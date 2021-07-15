@@ -233,7 +233,9 @@ public class RedisExecutor<V, R> {
 
                 if (attempt == attempts) {
                     // filled out in connectionFuture or writeFuture handler
-                    attemptPromise.tryFailure(exception);
+                    if (exception != null) {
+                        attemptPromise.tryFailure(exception);
+                    }
                     return;
                 }
                 if (!attemptPromise.cancel(false)) {
@@ -510,6 +512,7 @@ public class RedisExecutor<V, R> {
         }
 
         RedisConnection connection = connectionFuture.getNow();
+        connection.setQueued(false);
         connectionManager.getShutdownLatch().release();
         if (readOnlyMode) {
             connectionManager.releaseRead(source, connection);

@@ -127,7 +127,7 @@ public abstract class BaseMapTest extends BaseTest {
 
     }
     
-    private void destroy(RMap<?, ?> map) {
+    protected void destroy(RMap<?, ?> map) {
         if (map instanceof RDestroyable) {
             ((RDestroyable) map).destroy();
         }
@@ -174,6 +174,57 @@ public abstract class BaseMapTest extends BaseTest {
         });
         assertThat(map.get("1")).isEqualTo("12");
     }
+
+    public static class MyClass implements Serializable {
+
+        private String name;
+
+        public MyClass(String name) {
+            this.name = name;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            MyClass myClass = (MyClass) o;
+            return Objects.equals(name, myClass.name);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(name);
+        }
+
+        @Override
+        public String toString() {
+            return "MyClass{" +
+                    "name='" + name + '\'' +
+                    '}';
+        }
+    }
+
+    @Test
+    public void testComputeIfPresentMutable() {
+        RMap<String, MyClass> map = getMap("map");
+
+        map.put("1", new MyClass("value1"));
+        map.computeIfPresent("1", (key, value) -> {
+            assertThat(value).isEqualTo(new MyClass("value1"));
+            value.setName("value2");
+            return value;
+        });
+        assertThat(map.get("1")).isEqualTo(new MyClass("value2"));
+    }
+
 
     @Test
     public void testComputeIfAbsent() {
@@ -1428,6 +1479,9 @@ public abstract class BaseMapTest extends BaseTest {
         map.put("0", "00");
         assertThat(map.get("0")).isEqualTo("00");
         assertThat(map.size()).isEqualTo(2);
+
+        assertThat(map.containsKey("2")).isTrue();
+        assertThat(map.size()).isEqualTo(3);
         
         Map<String, String> s = map.getAll(new HashSet<>(Arrays.asList("1", "2", "9", "3")));
         Map<String, String> expectedMap = new HashMap<>();

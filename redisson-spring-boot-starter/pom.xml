@@ -4,12 +4,12 @@
     <parent>
         <groupId>org.redisson</groupId>
         <artifactId>redisson-parent</artifactId>
-        <version>3.15.5-SNAPSHOT</version>
+        <version>3.16.1-SNAPSHOT</version>
         <relativePath>../</relativePath>
     </parent>
 
     <properties>
-        <spring-boot.version>2.4.4</spring-boot.version>
+        <spring-boot.version>2.5.2</spring-boot.version>
     </properties>
 
     <artifactId>redisson-spring-boot-starter</artifactId>
@@ -84,10 +84,6 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -107,13 +103,19 @@
       	<dependency>
       		<groupId>org.springframework.session</groupId>
       		<artifactId>spring-session-core</artifactId>
-                <scope>test</scope>
+            <scope>test</scope>
       	</dependency>
 
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            <scope>test</scope>
+        </dependency>
+
       	<dependency>
-      		<groupId>org.springframework.session</groupId>
-      		<artifactId>spring-session-data-redis</artifactId>
-                <scope>test</scope>
+            <groupId>org.springframework.session</groupId>
+            <artifactId>spring-session-data-redis</artifactId>
+            <scope>test</scope>
       	</dependency>
 <!--
         <dependency>
@@ -129,7 +131,7 @@
 
         <dependency>
             <groupId>org.redisson</groupId>
-            <artifactId>redisson-spring-data-24</artifactId>
+            <artifactId>redisson-spring-data-25</artifactId>
             <version>${project.version}</version>
         </dependency>
 

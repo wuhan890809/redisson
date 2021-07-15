@@ -242,8 +242,7 @@ public class RedissonBatchTest extends BaseTest {
     }
     
     @ParameterizedTest
-@MethodSource("data")
-
+    @MethodSource("data")
     public void testConnectionLeakAfterError() throws InterruptedException {
         Config config = createConfig();
         config.useSingleServer()
@@ -556,10 +555,40 @@ public class RedissonBatchTest extends BaseTest {
         
         redisson.shutdown();
     }
-    
-    @ParameterizedTest
-@MethodSource("data")
 
+    @ParameterizedTest
+    @MethodSource("data")
+    public void testBatchPing(BatchOptions batchOptions) throws InterruptedException {
+        Config config = createConfig();
+        config.useSingleServer().setPingConnectionInterval(100);
+        RedissonClient redisson =  Redisson.create(config);
+
+        RBatch batch = redisson.createBatch(batchOptions);
+        batch.getBucket("test").trySetAsync("1232");
+        Thread.sleep(500);
+        BatchResult<?> r = batch.execute();
+        assertThat((List<Object>)r.getResponses()).containsExactly(true);
+
+        redisson.shutdown();
+    }
+
+    @ParameterizedTest
+    @MethodSource("data")
+    public void testShutdownTimeout(BatchOptions batchOptions) {
+        org.junit.jupiter.api.Assertions.assertTimeout(Duration.ofMillis(500), () -> {
+            RedissonClient redisson = createInstance();
+
+            RBatch batch = redisson.createBatch(batchOptions);
+            for (int i = 0; i < 10; i++) {
+                RFuture<Void> f = batch.getBucket("test").setAsync(123);
+            }
+            batch.execute();
+            redisson.shutdown();
+        });
+    }
+
+    @ParameterizedTest
+    @MethodSource("data")
     public void testBatchBigRequest(BatchOptions batchOptions) {
         Config config = createConfig();
         config.useSingleServer().setTimeout(15000);

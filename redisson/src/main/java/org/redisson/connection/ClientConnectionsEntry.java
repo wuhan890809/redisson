@@ -20,13 +20,19 @@ import org.redisson.api.RFuture;
 import org.redisson.client.RedisClient;
 import org.redisson.client.RedisConnection;
 import org.redisson.client.RedisPubSubConnection;
+import org.redisson.client.protocol.RedisCommand;
+import org.redisson.client.protocol.RedisCommands;
 import org.redisson.config.ReadMode;
 import org.redisson.pubsub.AsyncSemaphore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Deque;
+import java.util.Iterator;
 import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -43,8 +49,9 @@ public class ClientConnectionsEntry {
     private final AsyncSemaphore freeSubscribeConnectionsCounter;
 
     private final Queue<RedisConnection> allConnections = new ConcurrentLinkedQueue<>();
-    private final Queue<RedisConnection> freeConnections = new ConcurrentLinkedQueue<>();
+    private final Deque<RedisConnection> freeConnections = new ConcurrentLinkedDeque<>();
     private final AsyncSemaphore freeConnectionsCounter;
+    private volatile Iterator<RedisConnection> iter;
 
     public enum FreezeReason {MANAGER, RECONNECT, SYSTEM}
 
@@ -67,15 +74,17 @@ public class ClientConnectionsEntry {
         this.freeSubscribeConnectionsCounter = new AsyncSemaphore(subscribePoolMaxSize);
 
         if (subscribePoolMaxSize > 0) {
-            connectionManager.getConnectionWatcher().add(subscribePoolMinSize, subscribePoolMaxSize, freeSubscribeConnections, freeSubscribeConnectionsCounter, c -> {
+            connectionManager.getConnectionWatcher().add(this, subscribePoolMinSize, subscribePoolMaxSize, freeSubscribeConnections, freeSubscribeConnectionsCounter, c -> {
                 freeSubscribeConnections.remove(c);
                 return allSubscribeConnections.remove(c);
             });
         }
-        connectionManager.getConnectionWatcher().add(poolMinSize, poolMaxSize, freeConnections, freeConnectionsCounter, c -> {
+        connectionManager.getConnectionWatcher().add(this, poolMinSize, poolMaxSize, freeConnections, freeConnectionsCounter, c -> {
                 freeConnections.remove(c);
                 return allConnections.remove(c);
             });
+
+        iter = freeConnections.iterator();
     }
     
     public boolean isMasterForRead() {
@@ -115,6 +124,11 @@ public class ClientConnectionsEntry {
         firstFailTime.compareAndSet(0, System.currentTimeMillis());
     }
 
+    public RFuture<Void> shutdownAsync() {
+        connectionManager.getConnectionWatcher().remove(this);
+        return client.shutdownAsync();
+    }
+
     public RedisClient getClient() {
         return client;
     }
@@ -143,8 +157,23 @@ public class ClientConnectionsEntry {
         return freeConnectionsCounter.getCounter();
     }
 
-    public void acquireConnection(Runnable runnable) {
-        freeConnectionsCounter.acquire(runnable);
+    private boolean isPolled(RedisCommand<?> command) {
+        return command == null
+                || RedisCommands.FLUSHDB.getName().equals(command.getName())
+                || RedisCommands.FLUSHALL.getName().equals(command.getName())
+                || RedisCommands.BLOCKING_COMMAND_NAMES.contains(command.getName())
+                || RedisCommands.BLOCKING_COMMANDS.contains(command)
+                || RedisCommands.PUBSUB_COMMANDS.contains(command.getName())
+                || RedisCommands.SCAN_COMMANDS.contains(command.getName());
+    }
+
+    public void acquireConnection(Runnable runnable, RedisCommand<?> command) {
+        if (isPolled(command)) {
+            freeConnectionsCounter.acquire(runnable);
+            return;
+        }
+
+        runnable.run();
     }
     
     public void removeConnection(Runnable runnable) {
@@ -155,8 +184,52 @@ public class ClientConnectionsEntry {
         freeConnectionsCounter.release();
     }
 
-    public RedisConnection pollConnection() {
-        return freeConnections.poll();
+    AtomicBoolean lock = new AtomicBoolean();
+
+    public RedisConnection pollConnection(RedisCommand<?> command) {
+        if (isPolled(command)) {
+            while (true) {
+                if (lock.compareAndSet(false, true)) {
+                    if (!iter.hasNext()) {
+                        iter = freeConnections.iterator();
+                    }
+                    try {
+                        if (iter.hasNext()) {
+                            RedisConnection c = iter.next();
+                            iter.remove();
+                            if (c != null) {
+                                c.incUsage();
+                                c.setPooled(true);
+                            }
+                            return c;
+                        }
+                        return null;
+                    } finally {
+                        lock.set(false);
+                    }
+                }
+            }
+        }
+
+        while (true) {
+            if (lock.compareAndSet(false, true)) {
+                if (!iter.hasNext()) {
+                    iter = freeConnections.iterator();
+                }
+                try {
+                    if (iter.hasNext()) {
+                        RedisConnection c = iter.next();
+                        if (c != null) {
+                            c.incUsage();
+                        }
+                        return c;
+                    }
+                    return null;
+                } finally {
+                    lock.set(false);
+                }
+            }
+        }
     }
 
     public void releaseConnection(RedisConnection connection) {
@@ -170,7 +243,15 @@ public class ClientConnectionsEntry {
         }
 
         connection.setLastUsageTime(System.nanoTime());
-        freeConnections.add(connection);
+        if (connection.getUsage() == 0) {
+            freeConnections.add(connection);
+            return;
+        }
+        connection.decUsage();
+        if (connection.isPooled() && connection.getUsage() == 0) {
+            freeConnections.add(connection);
+            connection.setPooled(false);
+        }
     }
 
     public RFuture<RedisConnection> connect() {

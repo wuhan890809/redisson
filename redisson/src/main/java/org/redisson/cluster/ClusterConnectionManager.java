@@ -449,6 +449,13 @@ public class ClusterConnectionManager extends MasterSlaveConnectionManager {
                     return;
                 }
 
+                if (nodes.isEmpty()) {
+                    log.debug("cluster nodes state got from {}: doesn't contain any nodes", connection.getRedisClient().getAddr());
+                    getShutdownLatch().release();
+                    checkClusterState(cfg, iterator, lastException);
+                    return;
+                }
+
                 lastClusterNode = uri;
 
                 StringBuilder nodesValue = new StringBuilder();
@@ -651,14 +658,21 @@ public class ClusterConnectionManager extends MasterSlaveConnectionManager {
     }
     
     private void checkSlotsMigration(Collection<ClusterPartition> newPartitions) {
+        Set<ClusterPartition> clusterLastPartitions = getLastPartitions();
+
+        // https://github.com/redisson/redisson/issues/3635
+        Map<String, MasterSlaveEntry> nodeEntries = clusterLastPartitions.stream().collect(Collectors.toMap(p -> p.getNodeId(),
+                                                                                    p -> getEntry(p.slots().nextSetBit(0))));
+
         Set<Integer> changedSlots = new HashSet<>();
-        for (ClusterPartition currentPartition : getLastPartitions()) {
+        for (ClusterPartition currentPartition : clusterLastPartitions) {
+            String nodeId = currentPartition.getNodeId();
             for (ClusterPartition newPartition : newPartitions) {
-                if (!Objects.equals(currentPartition.getNodeId(), newPartition.getNodeId())) {
+                if (!Objects.equals(nodeId, newPartition.getNodeId())) {
                     continue;
                 }
 
-                MasterSlaveEntry entry = getEntry(currentPartition.slots().nextSetBit(0));
+                MasterSlaveEntry entry = nodeEntries.get(nodeId);
                 BitSet addedSlots = newPartition.copySlots();
                 addedSlots.andNot(currentPartition.slots());
                 currentPartition.addSlots(addedSlots);
@@ -684,6 +698,13 @@ public class ClusterConnectionManager extends MasterSlaveConnectionManager {
                 });
                 if (!removedSlots.isEmpty()) {
                     log.info("{} slots removed from {}", removedSlots.cardinality(), currentPartition.getMasterAddress());
+                }
+
+                if (!addedSlots.isEmpty() || !removedSlots.isEmpty()) {
+                    // https://github.com/redisson/redisson/issues/3695, slotRanges not update when slots of node changed.
+                    Set<ClusterSlotRange> slotRanges = currentPartition.getSlotRanges();
+                    slotRanges.clear();
+                    slotRanges.addAll(newPartition.getSlotRanges());
                 }
                 break;
             }
