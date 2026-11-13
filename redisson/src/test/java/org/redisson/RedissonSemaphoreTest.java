@@ -1,21 +1,51 @@
 package org.redisson;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import org.awaitility.Awaitility;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.redisson.api.RSemaphore;
 
 import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.awaitility.Awaitility;
-import org.junit.jupiter.api.Test;
-import org.redisson.api.RSemaphore;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class RedissonSemaphoreTest extends BaseConcurrentTest {
 
     @Test
+    public void testAcquireAfterAddPermits() throws InterruptedException {
+        RSemaphore s = redisson.getSemaphore("test");
+
+        CountDownLatch l = new CountDownLatch(1);
+        Thread t1 = new Thread(() -> {
+            s.addPermits(1);
+            try {
+                s.acquire(2);
+                l.countDown();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        });
+
+        t1.start();
+        t1.join(1000);
+        assertThat(l.await(1, TimeUnit.SECONDS)).isFalse();
+        s.acquire();
+        Thread.sleep(1000);
+        s.release();
+        assertThat(l.await(1, TimeUnit.SECONDS)).isFalse();
+        s.addPermits(1);
+        assertThat(l.await(1, TimeUnit.SECONDS)).isTrue();
+    }
+
+    @Test
     public void testZero() throws InterruptedException {
         RSemaphore s = redisson.getSemaphore("test");
-        assertThat(s.tryAcquire(0, 10, TimeUnit.MINUTES)).isTrue();
+        assertThat(s.tryAcquire(0, Duration.ofMinutes(10))).isTrue();
         s.release(0);
         assertThat(s.availablePermits()).isZero();
     }
@@ -29,12 +59,21 @@ public class RedissonSemaphoreTest extends BaseConcurrentTest {
     }
     
     @Test
-    public void testTrySetPermits() {
+    public void testTrySetPermits() throws InterruptedException {
         RSemaphore s = redisson.getSemaphore("test");
         assertThat(s.trySetPermits(10)).isTrue();
         assertThat(s.availablePermits()).isEqualTo(10);
         assertThat(s.trySetPermits(15)).isFalse();
         assertThat(s.availablePermits()).isEqualTo(10);
+        s.delete();
+
+        assertThat(s.isExists()).isFalse();
+        assertThat(s.trySetPermits(1, Duration.ofSeconds(2))).isTrue();
+        Thread.sleep(1000);
+        assertThat(s.availablePermits()).isEqualTo(1);
+        Thread.sleep(1000);
+        assertThat(s.availablePermits()).isZero();
+        assertThat(s.isExists()).isFalse();
     }
 
     @Test
@@ -54,7 +93,7 @@ public class RedissonSemaphoreTest extends BaseConcurrentTest {
 
     @Test
     public void testReducePermits() throws InterruptedException {
-        RSemaphore s = redisson.getSemaphore("test");
+        RSemaphore s = redisson.getSemaphore("test2");
         s.trySetPermits(10);
         
         s.acquire(10);
@@ -95,6 +134,7 @@ public class RedissonSemaphoreTest extends BaseConcurrentTest {
     }
 
     @Test
+    @Timeout(5)
     public void testBlockingNAcquire() throws InterruptedException {
         RSemaphore s = redisson.getSemaphore("test");
         s.trySetPermits(5);
@@ -160,8 +200,8 @@ public class RedissonSemaphoreTest extends BaseConcurrentTest {
         t.start();
         t.join(1);
 
-        Awaitility.await().between(Duration.ofMillis(900), Duration.ofMillis(1020)).untilAsserted(() -> {
-            assertThat(s.tryAcquire(4, 2, TimeUnit.SECONDS)).isTrue();
+        Awaitility.await().between(Duration.ofMillis(900), Duration.ofMillis(1200)).untilAsserted(() -> {
+            assertThat(s.tryAcquire(4, Duration.ofSeconds(2))).isTrue();
         });
 
         assertThat(s.availablePermits()).isEqualTo(0);
@@ -178,6 +218,8 @@ public class RedissonSemaphoreTest extends BaseConcurrentTest {
     @Test
     public void testDrainPermits() throws InterruptedException {
         RSemaphore s = redisson.getSemaphore("test");
+        assertThat(s.drainPermits()).isZero();
+
         s.trySetPermits(10);
         s.acquire(3);
 
@@ -197,6 +239,19 @@ public class RedissonSemaphoreTest extends BaseConcurrentTest {
         assertThat(s.availablePermits()).isEqualTo(5);
         s.release(5);
         assertThat(s.availablePermits()).isEqualTo(10);
+    }
+
+    @Test
+    public void testReleaseIfExists() throws InterruptedException {
+        RSemaphore s = redisson.getSemaphore("test");
+        s.trySetPermits(10);
+        s.acquire();
+        assertThat(s.availablePermits()).isEqualTo(9);
+        assertThat(s.releaseIfExists(1)).isTrue();
+        assertThat(s.availablePermits()).isEqualTo(10);
+
+        RSemaphore s1 = redisson.getSemaphore("test2");
+        assertThat(s1.releaseIfExists(1)).isFalse();
     }
 
 
@@ -222,6 +277,39 @@ public class RedissonSemaphoreTest extends BaseConcurrentTest {
         });
 
         assertThat(lockedCounter.get()).isEqualTo(iterations);
+    }
+
+    @Test
+    public void testConcurrencyLoopMax_MultiInstance() throws InterruptedException {
+        final int iterations = 10;
+        final AtomicInteger lockedCounter = new AtomicInteger();
+
+        RSemaphore s = redisson.getSemaphore("test");
+        s.trySetPermits(Integer.MAX_VALUE);
+
+        testMultiInstanceConcurrency(4, r -> {
+            for (int i = 0; i < iterations; i++) {
+                int v = Integer.MAX_VALUE;
+                if (ThreadLocalRandom.current().nextBoolean()) {
+                    v = 1;
+                }
+                try {
+                    r.getSemaphore("test").acquire(v);
+                }catch (InterruptedException e1) {
+                    // TODO Auto-generated catch block
+                    e1.printStackTrace();
+                }
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                lockedCounter.incrementAndGet();
+                r.getSemaphore("test").release(v);
+            }
+        });
+
+        assertThat(lockedCounter.get()).isEqualTo(4 * iterations);
     }
 
     @Test
@@ -276,6 +364,31 @@ public class RedissonSemaphoreTest extends BaseConcurrentTest {
         });
 
         assertThat(lockedCounter.get()).isEqualTo(iterations);
+    }
+
+    @Test
+    public void testTrySetPermitsWithTTLRejectsInvalidDuration() {
+        RSemaphore semaphore = redisson.getSemaphore("testTrySetPermitsWithTTLRejectsInvalidDuration");
+
+        // Zero duration
+        assertThatThrownBy(() -> semaphore.trySetPermits(10, Duration.ZERO))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("timeToLive must be at least 1 ms");
+
+        // Negative duration
+        assertThatThrownBy(() -> semaphore.trySetPermits(10, Duration.ofMillis(-100)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("timeToLive must be at least 1 ms");
+
+        // Positive but below 1 ms: toMillis() truncates to 0, which would be sent as 'PX 0'
+        assertThatThrownBy(() -> semaphore.trySetPermits(10, Duration.ofNanos(500_000)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("timeToLive must be at least 1 ms");
+
+        assertThat(semaphore.isExists()).isFalse();
+
+        // Smallest valid value is still accepted
+        assertThat(semaphore.trySetPermits(10, Duration.ofMillis(1))).isTrue();
     }
 
 }

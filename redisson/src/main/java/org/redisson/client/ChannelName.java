@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,37 +15,55 @@
  */
 package org.redisson.client;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 import io.netty.util.CharsetUtil;
 
 /**
- * 
+ *
  * @author Nikita Koksharov
  *
  */
 public class ChannelName implements CharSequence {
 
+    public static final ChannelName TRACKING = new ChannelName("__redis__:invalidate");
+
+    public static List<ChannelName> newList(ChannelName name) {
+        List<ChannelName> result = new ArrayList<>(1);
+        result.add(name);
+        return result;
+    }
+
+    public static List<ChannelName> newList(String name) {
+        List<ChannelName> result = new ArrayList<>(1);
+        result.add(new ChannelName(name));
+        return result;
+    }
+
     private final byte[] name;
+    private final String str;
 
     public ChannelName(byte[] name) {
         super();
         this.name = name;
+        this.str = new String(name, CharsetUtil.UTF_8);
     }
-    
+
     public ChannelName(String name) {
         this(name.getBytes(CharsetUtil.UTF_8));
     }
 
     @Override
     public String toString() {
-        return new String(name, CharsetUtil.UTF_8);
+        return str;
     }
-    
+
     public byte[] getName() {
         return name;
     }
-    
+
     @Override
     public int hashCode() {
         final int prime = 31;
@@ -53,7 +71,7 @@ public class ChannelName implements CharSequence {
         result = prime * result + Arrays.hashCode(name);
         return result;
     }
-    
+
     @Override
     public boolean equals(Object obj) {
         if (this == obj) {
@@ -81,6 +99,15 @@ public class ChannelName implements CharSequence {
     @Override
     public CharSequence subSequence(int start, int end) {
         return toString().subSequence(start, end);
+    }
+
+    public boolean isKeyspace() {
+        return str.startsWith("__keyspace") || str.startsWith("__keyevent")
+                || str.startsWith("__subkeyspace") || str.startsWith("__subkeyevent");
+    }
+
+    public boolean isTracking() {
+        return str.equals(TRACKING.toString());
     }
 
 }

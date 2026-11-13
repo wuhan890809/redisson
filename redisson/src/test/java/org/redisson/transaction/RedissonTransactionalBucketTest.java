@@ -1,17 +1,44 @@
 package org.redisson.transaction;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
-import java.util.concurrent.TimeUnit;
-
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.redisson.BaseTest;
-import org.redisson.api.RBucket;
-import org.redisson.api.RTransaction;
-import org.redisson.api.TransactionOptions;
+import org.redisson.RedisDockerTest;
+import org.redisson.Redisson;
+import org.redisson.api.*;
+import org.redisson.config.Config;
+import org.redisson.config.NameMapper;
 
-public class RedissonTransactionalBucketTest extends BaseTest {
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class RedissonTransactionalBucketTest extends RedisDockerTest {
+
+    @Test
+    public void testNameMapper() {
+        Config c = createConfig();
+        c.useSingleServer().setNameMapper(new NameMapper() {
+            @Override
+            public String map(String name) {
+                return name + ":mysuffix";
+            }
+
+            @Override
+            public String unmap(String name) {
+                return name.replace(":mysuffix", "");
+            }
+        });
+        RedissonClient redisson = Redisson.create(c);
+
+        RTransaction t = redisson.createTransaction(TransactionOptions.defaults());
+        t.getBucket("test").set("1");
+        t.commit();
+
+        assertThat(redisson.getBucket("test").get()).isEqualTo("1");
+
+        redisson.shutdown();
+    }
 
     @Test
     public void testTimeout() throws InterruptedException {
@@ -43,15 +70,59 @@ public class RedissonTransactionalBucketTest extends BaseTest {
         
         RTransaction transaction = redisson.createTransaction(TransactionOptions.defaults());
         RBucket<String> bucket = transaction.getBucket("test");
+        assertThat(bucket.get()).isEqualTo("123");
         bucket.set("234");
         assertThat(bucket.get()).isEqualTo("234");
-        
+
         transaction.commit();
-        
+
+        redisson.getKeys().deleteByPattern("*redisson_unlock_latch*");
         assertThat(redisson.getKeys().count()).isEqualTo(1);
         assertThat(b.get()).isEqualTo("234");
     }
-    
+
+    @Test
+    public void testSetDuration() throws InterruptedException {
+        RBucket<String> b = redisson.getBucket("test");
+        b.set("123");
+
+        RTransaction transaction = redisson.createTransaction(TransactionOptions.defaults());
+        RBucket<String> bucket = transaction.getBucket("test");
+        bucket.set("234", Duration.ofSeconds(2));
+        assertThat(bucket.get()).isEqualTo("234");
+        assertThat(b.get()).isEqualTo("123");
+        transaction.commit();
+
+        assertThat(b.get()).isEqualTo("234");
+        Thread.sleep(2200);
+        assertThat(b.get()).isNull();
+    }
+
+    @Test
+    public void testExpire() throws InterruptedException {
+        RBucket<String> b = redisson.getBucket("test");
+        b.set("123");
+
+        RTransaction transaction = redisson.createTransaction(TransactionOptions.defaults());
+        RBucket<String> bucket = transaction.getBucket("test");
+        assertThat(bucket.clearExpire()).isFalse();
+        assertThat(bucket.expire(Duration.ofSeconds(2))).isTrue();
+        assertThat(bucket.clearExpire()).isTrue();
+        transaction.commit();
+
+        Thread.sleep(2200);
+
+        assertThat(b.get()).isEqualTo("123");
+
+        RTransaction transaction2 = redisson.createTransaction(TransactionOptions.defaults());
+        RBucket<String> bucket2 = transaction2.getBucket("test");
+        assertThat(bucket2.expire(Duration.ofSeconds(1))).isTrue();
+        transaction2.commit();
+
+        Thread.sleep(1100);
+        assertThat(b.get()).isNull();
+    }
+
     @Test
     public void testGetAndSet() {
         RBucket<String> b = redisson.getBucket("test");
@@ -64,7 +135,8 @@ public class RedissonTransactionalBucketTest extends BaseTest {
         assertThat(bucket.getAndSet("324")).isEqualTo("0");
         
         transaction.commit();
-        
+
+        redisson.getKeys().deleteByPattern("*redisson_unlock_latch*");
         assertThat(redisson.getKeys().count()).isEqualTo(1);
         assertThat(b.get()).isEqualTo("324");
     }
@@ -82,7 +154,8 @@ public class RedissonTransactionalBucketTest extends BaseTest {
         assertThat(bucket.get()).isEqualTo("232");
         
         transaction.commit();
-        
+
+        redisson.getKeys().deleteByPattern("*redisson_unlock_latch*");
         assertThat(redisson.getKeys().count()).isEqualTo(1);
         assertThat(b.get()).isEqualTo("232");
     }
@@ -100,7 +173,8 @@ public class RedissonTransactionalBucketTest extends BaseTest {
         assertThat(bucket.trySet("43")).isFalse();
         
         transaction.commit();
-        
+
+        redisson.getKeys().deleteByPattern("*redisson_unlock_latch*");
         assertThat(redisson.getKeys().count()).isEqualTo(1);
         assertThat(b.get()).isEqualTo("324");
     }
@@ -113,14 +187,15 @@ public class RedissonTransactionalBucketTest extends BaseTest {
         RTransaction transaction = redisson.createTransaction(TransactionOptions.defaults());
         RBucket<String> set = transaction.getBucket("test");
         assertThat(set.get()).isEqualTo("123");
-        assertThat(set.size()).isEqualTo(6);
+        assertThat(set.size()).isEqualTo(4);
         assertThat(set.getAndDelete()).isEqualTo("123");
         assertThat(set.size()).isEqualTo(0);
         assertThat(set.get()).isNull();
         assertThat(set.getAndDelete()).isNull();
         
         transaction.commit();
-        
+
+        redisson.getKeys().deleteByPattern("*redisson_unlock_latch*");
         assertThat(redisson.getKeys().count()).isEqualTo(0);
         assertThat(m.get()).isNull();
     }
@@ -138,11 +213,31 @@ public class RedissonTransactionalBucketTest extends BaseTest {
         assertThat(b.get()).isEqualTo("1234");
         
         transaction.rollback();
-        
+
+        redisson.getKeys().deleteByPattern("*redisson_unlock_latch*");
         assertThat(redisson.getKeys().count()).isEqualTo(1);
         
         assertThat(b.get()).isEqualTo("1234");
     }
 
+    @Test
+    public void testRollback2() {
+        String key = "TRANS_TEST";
+        RBucket<Object> b = redisson.getBucket(key);
+        RTransaction transaction = redisson.createTransaction(TransactionOptions.defaults());
+
+        redisson.getKeys().delete(key);
+
+        RBucket<String> bucket = transaction.getBucket(key);
+        bucket.set("1");
+        bucket.set("2");
+        bucket.set("3");
+        bucket.set("4");
+        bucket.set("5");
+        bucket.setIfAbsent("LAST_VALUE");
+        transaction.rollback();
+
+        assertThat(b.get()).isNull();
+    }
     
 }

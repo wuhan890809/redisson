@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ package org.redisson.client.protocol.decoder;
 
 import java.io.IOException;
 
-import org.redisson.api.StreamMessageId;
+import org.redisson.api.stream.StreamMessageId;
 import org.redisson.client.codec.StringCodec;
 import org.redisson.client.handler.State;
 import org.redisson.client.protocol.Decoder;
@@ -38,7 +38,7 @@ public class StreamIdDecoder implements Decoder<Object> {
         if (parts.length == 1) {
             return null;
         }
-        return new StreamMessageId(Long.valueOf(parts[0]), Long.valueOf(parts[1]));
+        return new StreamMessageId(Long.parseLong(parts[0]), Long.parseLong(parts[1]));
     }
 
 }

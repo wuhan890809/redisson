@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,14 @@
  */
 package org.redisson.client.codec;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 
 import org.redisson.cache.LocalCachedMessageCodec;
 import org.redisson.client.protocol.Decoder;
 import org.redisson.client.protocol.Encoder;
+import org.redisson.codec.ProtobufCodec;
 import org.redisson.jcache.JCacheEventCodec;
 
 /**
@@ -32,9 +34,9 @@ public abstract class BaseCodec implements Codec {
 
     public static final List<Class<?>> SKIPPED_CODECS = Arrays.asList(
             StringCodec.class, ByteArrayCodec.class, LocalCachedMessageCodec.class, BitSetCodec.class,
-            JCacheEventCodec.class, LongCodec.class, IntegerCodec.class);
+            JCacheEventCodec.class, LongCodec.class, IntegerCodec.class, ProtobufCodec.class);
     
-    public static Codec copy(ClassLoader classLoader, Codec codec) throws ReflectiveOperationException {
+    public static <T> T copy(ClassLoader classLoader, T codec) throws ReflectiveOperationException {
         if (codec == null) {
             return codec;
         }
@@ -45,7 +47,13 @@ public abstract class BaseCodec implements Codec {
             }
         }
 
-        return codec.getClass().getConstructor(ClassLoader.class, codec.getClass()).newInstance(classLoader, codec);
+        return (T) codec.getClass().getConstructor(ClassLoader.class, codec.getClass()).newInstance(classLoader, codec);
+    }
+
+    protected static void checkDecompressionSize(int size) throws IOException {
+        if (size < 0 || size > 512 * 1024 * 1024) {
+            throw new IOException("Invalid decompressed size header: " + size + ". Must be between 0 and 512 MB.");
+        }
     }
     
     @Override

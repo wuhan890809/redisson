@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ import org.redisson.command.CommandAsyncExecutor;
 abstract class RedissonMultiMapIterator<K, V, M> implements Iterator<M> {
 
     private Iterator<Map.Entry<Object, Object>> keysIter;
-    protected long keysIterPos = 0;
+    protected String keysIterPos = "0";
 
     private K currentKey;
     private Iterator<V> valuesIter;
@@ -54,11 +54,17 @@ abstract class RedissonMultiMapIterator<K, V, M> implements Iterator<M> {
 
     final CommandAsyncExecutor commandExecutor;
     final Codec codec;
+    final int count;
 
     RedissonMultiMapIterator(RedissonMultimap<K, V> map, CommandAsyncExecutor commandExecutor, Codec codec) {
+        this(map, commandExecutor, codec, 10);
+    }
+
+    RedissonMultiMapIterator(RedissonMultimap<K, V> map, CommandAsyncExecutor commandExecutor, Codec codec, int count) {
         this.map = map;
         this.commandExecutor = commandExecutor;
         this.codec = codec;
+        this.count = count;
     }
 
 
@@ -73,12 +79,12 @@ abstract class RedissonMultiMapIterator<K, V, M> implements Iterator<M> {
 
         while (true) {
             if (!keysFinished && (keysIter == null || !keysIter.hasNext())) {
-                MapScanResult<Object, Object> res = map.scanIterator(client, keysIterPos);
+                MapScanResult<Object, Object> res = map.scanIterator(client, keysIterPos, count);
                 client = res.getRedisClient();
                 keysIter = res.getMap().entrySet().iterator();
                 keysIterPos = res.getPos();
-                
-                if (res.getPos() == 0) {
+
+                if ("0".equals(res.getPos())) {
                     keysFinished = true;
                 }
             }
@@ -87,20 +93,20 @@ abstract class RedissonMultiMapIterator<K, V, M> implements Iterator<M> {
                 Entry<Object, Object> e = keysIter.next();
                 currentKey = (K) e.getKey();
                 String name = e.getValue().toString();
-                valuesIter = getIterator(name);
+                valuesIter = getIterator(name, count);
                 if (valuesIter.hasNext()) {
                     return true;
                 }
             }
             
-            if (keysIterPos == 0) {
+            if ("0".equals(keysIterPos)) {
                 finished = true;
                 return false;
             }
         }
     }
 
-    protected abstract Iterator<V> getIterator(String name);
+    protected abstract Iterator<V> getIterator(String name, int count);
 
     @Override
     public M next() {

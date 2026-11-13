@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package org.redisson.client.protocol.decoder;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 
 import org.redisson.client.codec.Codec;
@@ -30,7 +31,12 @@ import org.redisson.client.protocol.Decoder;
  */
 public interface MultiDecoder<T> {
 
-    default Decoder<Object> getDecoder(Codec codec, int paramNum, State state) {
+    default Decoder<Object> getDecoder(Codec codec, int paramNum, State state, long size, List<Object> parts) {
+        return getDecoder(codec, paramNum, state, size);
+    }
+
+    @Deprecated
+    default Decoder<Object> getDecoder(Codec codec, int paramNum, State state, long size) {
         if (codec == null) {
             codec = StringCodec.INSTANCE;
         }
@@ -38,5 +44,12 @@ public interface MultiDecoder<T> {
     }
     
     T decode(List<Object> parts, State state);
+
+    static <K, V> LinkedHashMap<K, V> newLinkedHashMap(int expectedSize) {
+        if (expectedSize < 3) {
+            return new LinkedHashMap<>(expectedSize + 1);
+        }
+        return new LinkedHashMap<>((int) Math.ceil(expectedSize / 0.75));
+    }
 
 }

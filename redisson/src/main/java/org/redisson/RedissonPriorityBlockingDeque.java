@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package org.redisson;
 
+import org.redisson.api.Entry;
 import org.redisson.api.RFuture;
 import org.redisson.api.RPriorityBlockingDeque;
 import org.redisson.api.RedissonClient;
@@ -22,14 +23,18 @@ import org.redisson.api.queue.DequeMoveArgs;
 import org.redisson.client.codec.Codec;
 import org.redisson.client.protocol.RedisCommands;
 import org.redisson.command.CommandAsyncExecutor;
-import org.redisson.misc.RPromise;
-import org.redisson.misc.RedissonPromise;
+import org.redisson.api.queue.QueueMoveElementsArgs;
+import org.redisson.misc.CompletableFutureWrapper;
 
 import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * <p>Distributed and concurrent implementation of priority blocking deque.
@@ -45,13 +50,12 @@ public class RedissonPriorityBlockingDeque<V> extends RedissonPriorityDeque<V> i
     
     protected RedissonPriorityBlockingDeque(CommandAsyncExecutor commandExecutor, String name, RedissonClient redisson) {
         super(commandExecutor, name, redisson);
-        blockingQueue = (RedissonPriorityBlockingQueue<V>) redisson.getPriorityBlockingQueue(name);
+        blockingQueue = new RedissonPriorityBlockingQueue<V>(commandExecutor, name, redisson);
     }
 
     protected RedissonPriorityBlockingDeque(Codec codec, CommandAsyncExecutor commandExecutor, String name, RedissonClient redisson) {
         super(codec, commandExecutor, name, redisson);
-        
-        blockingQueue = (RedissonPriorityBlockingQueue<V>) redisson.getPriorityBlockingQueue(name, codec);
+        blockingQueue = new RedissonPriorityBlockingQueue<V>(codec, commandExecutor, name, redisson);
     }
 
     @Override
@@ -89,6 +93,46 @@ public class RedissonPriorityBlockingDeque<V> extends RedissonPriorityDeque<V> i
     }
 
     @Override
+    public Entry<String, V> pollFromAnyWithName(Duration timeout, String... queueNames) throws InterruptedException {
+        throw new UnsupportedOperationException("use poll method");
+    }
+
+    @Override
+    public RFuture<Entry<String, V>> pollFromAnyWithNameAsync(Duration timeout, String... queueNames) {
+        throw new UnsupportedOperationException("use poll method");
+    }
+
+    @Override
+    public Entry<String, V> pollLastFromAnyWithName(Duration timeout, String... queueNames) throws InterruptedException {
+        throw new UnsupportedOperationException("use poll method");
+    }
+
+    @Override
+    public RFuture<Entry<String, V>> pollLastFromAnyWithNameAsync(Duration timeout, String... queueNames) {
+        throw new UnsupportedOperationException("use poll method");
+    }
+
+    @Override
+    public Map<String, List<V>> pollFirstFromAny(Duration duration, int count, String... queueNames) throws InterruptedException {
+        throw new UnsupportedOperationException("use poll method");
+    }
+
+    @Override
+    public Map<String, List<V>> pollLastFromAny(Duration duration, int count, String... queueNames) throws InterruptedException {
+        throw new UnsupportedOperationException("use poll method");
+    }
+
+    @Override
+    public RFuture<Map<String, List<V>>> pollFirstFromAnyAsync(Duration duration, int count, String... queueNames) {
+        throw new UnsupportedOperationException("use poll method");
+    }
+
+    @Override
+    public RFuture<Map<String, List<V>>> pollLastFromAnyAsync(Duration duration, int count, String... queueNames) {
+        throw new UnsupportedOperationException("use poll method");
+    }
+
+    @Override
     public RFuture<V> pollLastAndOfferFirstToAsync(String queueName, long timeout, TimeUnit unit) {
         return blockingQueue.pollLastAndOfferFirstToAsync(queueName, timeout, unit);
     }
@@ -105,12 +149,19 @@ public class RedissonPriorityBlockingDeque<V> extends RedissonPriorityDeque<V> i
 
     @Override
     public int subscribeOnElements(Consumer<V> consumer) {
-        return commandExecutor.getConnectionManager().getElementsSubscribeService().subscribeOnElements(this::takeAsync, consumer);
+        return getServiceManager().getElementsSubscribeService()
+                .subscribeOnElements(this::takeAsync, consumer);
+    }
+
+    @Override
+    public int subscribeOnElements(Function<V, CompletionStage<Void>> consumer) {
+        return getServiceManager().getElementsSubscribeService()
+                .subscribeOnElements(this::takeAsync, consumer);
     }
 
     @Override
     public void unsubscribe(int listenerId) {
-        commandExecutor.getConnectionManager().getElementsSubscribeService().unsubscribe(listenerId);
+        getServiceManager().getElementsSubscribeService().unsubscribe(listenerId);
     }
 
     public RFuture<V> takeLastAndOfferFirstToAsync(String queueName) {
@@ -204,9 +255,9 @@ public class RedissonPriorityBlockingDeque<V> extends RedissonPriorityDeque<V> i
 
     @Override
     public RFuture<V> takeLastAsync() {
-        RPromise<V> result = new RedissonPromise<V>();
+        CompletableFuture<V> result = new CompletableFuture<V>();
         blockingQueue.takeAsync(result, 0, 0, RedisCommands.RPOP, getRawName());
-        return result;
+        return new CompletableFutureWrapper<>(result);
     }
 
     @Override
@@ -236,12 +287,26 @@ public class RedissonPriorityBlockingDeque<V> extends RedissonPriorityDeque<V> i
 
     @Override
     public int subscribeOnFirstElements(Consumer<V> consumer) {
-        return commandExecutor.getConnectionManager().getElementsSubscribeService().subscribeOnElements(this::takeFirstAsync, consumer);
+        return getServiceManager().getElementsSubscribeService()
+                .subscribeOnElements(this::takeFirstAsync, consumer);
     }
 
     @Override
     public int subscribeOnLastElements(Consumer<V> consumer) {
-        return commandExecutor.getConnectionManager().getElementsSubscribeService().subscribeOnElements(this::takeLastAsync, consumer);
+        return getServiceManager().getElementsSubscribeService()
+                .subscribeOnElements(this::takeLastAsync, consumer);
+    }
+
+    @Override
+    public int subscribeOnLastElements(Function<V, CompletionStage<Void>> consumer) {
+        return getServiceManager().getElementsSubscribeService()
+                .subscribeOnElements(this::takeLastAsync, consumer);
+    }
+
+    @Override
+    public int subscribeOnFirstElements(Function<V, CompletionStage<Void>> consumer) {
+        return getServiceManager().getElementsSubscribeService()
+                .subscribeOnElements(this::takeFirstAsync, consumer);
     }
 
     @Override
@@ -256,9 +321,9 @@ public class RedissonPriorityBlockingDeque<V> extends RedissonPriorityDeque<V> i
 
     @Override
     public RFuture<V> pollLastAsync(long timeout, TimeUnit unit) {
-        RPromise<V> result = new RedissonPromise<V>();
+        CompletableFuture<V> result = new CompletableFuture<V>();
         blockingQueue.takeAsync(result, 0, unit.toMicros(timeout), RedisCommands.RPOP, getRawName());
-        return result;
+        return new CompletableFutureWrapper<>(result);
     }
 
     @Override
@@ -299,5 +364,15 @@ public class RedissonPriorityBlockingDeque<V> extends RedissonPriorityDeque<V> i
     @Override
     public RFuture<V> moveAsync(Duration timeout, DequeMoveArgs args) {
         throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public List<V> move(Duration timeout, QueueMoveElementsArgs args) {
+        throw new UnsupportedOperationException("use move(QueueMoveElementsArgs) method");
+    }
+
+    @Override
+    public RFuture<List<V>> moveAsync(Duration timeout, QueueMoveElementsArgs args) {
+        throw new UnsupportedOperationException("use moveAsync(QueueMoveElementsArgs) method");
     }
 }

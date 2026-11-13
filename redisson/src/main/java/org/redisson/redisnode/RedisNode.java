@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,14 +26,15 @@ import org.redisson.client.protocol.RedisCommands;
 import org.redisson.client.protocol.Time;
 import org.redisson.cluster.ClusterSlotRange;
 import org.redisson.command.CommandAsyncExecutor;
-import org.redisson.misc.RPromise;
+import org.redisson.misc.CompletableFutureWrapper;
 import org.redisson.misc.RedisURI;
-import org.redisson.misc.RedissonPromise;
 
 import java.net.InetSocketAddress;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 
@@ -73,21 +74,13 @@ public class RedisNode implements RedisClusterMaster, RedisClusterSlave, RedisMa
     
     @Override
     public RFuture<Boolean> pingAsync(long timeout, TimeUnit timeUnit) {
-        RPromise<Boolean> result = new RedissonPromise<>();
         RFuture<Boolean> f = commandExecutor.readAsync(client, null, RedisCommands.PING_BOOL);
-        f.onComplete((res, e) -> {
-            if (e != null) {
-                result.trySuccess(false);
-                return;
-            }
-            
-            result.trySuccess(res);
-        });
-        commandExecutor.getConnectionManager().newTimeout(t -> {
+        CompletionStage<Boolean> s = f.exceptionally(e -> false);
+        commandExecutor.getServiceManager().newTimeout(t -> {
             RedisTimeoutException ex = new RedisTimeoutException("Command execution timeout (" + timeUnit.toMillis(timeout) + "ms) for command: PING, Redis client: " + client);
-            result.tryFailure(ex);
+            s.toCompletableFuture().completeExceptionally(ex);
         }, timeout, timeUnit);
-        return result;
+        return new CompletableFutureWrapper<>(s);
     }
     
     @Override
@@ -345,6 +338,66 @@ public class RedisNode implements RedisClusterMaster, RedisClusterSlave, RedisMa
     @Override
     public RFuture<Void> setConfigAsync(String parameter, String value) {
         return commandExecutor.writeAsync(client, StringCodec.INSTANCE, RedisCommands.CONFIG_SET, parameter, value);
+    }
+
+    @Override
+    public void bgSave() {
+        commandExecutor.get(bgSaveAsync());
+    }
+
+    @Override
+    public void scheduleBgSave() {
+        commandExecutor.get(scheduleBgSaveAsync());
+    }
+
+    @Override
+    public void save() {
+        commandExecutor.get(saveAsync());
+    }
+
+    @Override
+    public Instant getLastSaveTime() {
+        return commandExecutor.get(getLastSaveTimeAsync());
+    }
+
+    @Override
+    public RFuture<Void> bgSaveAsync() {
+        return commandExecutor.writeAsync(client, StringCodec.INSTANCE, RedisCommands.BGSAVE);
+    }
+
+    @Override
+    public RFuture<Void> scheduleBgSaveAsync() {
+        return commandExecutor.writeAsync(client, StringCodec.INSTANCE, RedisCommands.BGSAVE, "SCHEDULE");
+    }
+
+    @Override
+    public RFuture<Void> saveAsync() {
+        return commandExecutor.writeAsync(client, StringCodec.INSTANCE, RedisCommands.SAVE);
+    }
+
+    @Override
+    public RFuture<Instant> getLastSaveTimeAsync() {
+        return commandExecutor.writeAsync(client, StringCodec.INSTANCE, RedisCommands.LASTSAVE_INSTANT);
+    }
+
+    @Override
+    public void bgRewriteAOF() {
+        commandExecutor.get(bgRewriteAOFAsync());
+    }
+
+    @Override
+    public RFuture<Void> bgRewriteAOFAsync() {
+        return commandExecutor.writeAsync(client, StringCodec.INSTANCE, RedisCommands.BGREWRITEAOF);
+    }
+
+    @Override
+    public long size() {
+        return commandExecutor.get(sizeAsync());
+    }
+
+    @Override
+    public RFuture<Long> sizeAsync() {
+        return commandExecutor.writeAsync(client, StringCodec.INSTANCE, RedisCommands.DBSIZE);
     }
 
 }

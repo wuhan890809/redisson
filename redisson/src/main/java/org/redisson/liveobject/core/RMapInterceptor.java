@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,27 +15,44 @@
  */
 package org.redisson.liveobject.core;
 
-import java.lang.reflect.Method;
-
+import net.bytebuddy.implementation.bind.annotation.*;
 import org.redisson.api.RMap;
+import org.redisson.command.CommandAsyncExecutor;
+import org.redisson.liveobject.resolver.MapResolver;
 
-import net.bytebuddy.implementation.bind.annotation.AllArguments;
-import net.bytebuddy.implementation.bind.annotation.FieldValue;
-import net.bytebuddy.implementation.bind.annotation.Origin;
-import net.bytebuddy.implementation.bind.annotation.RuntimeType;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 
 /**
  *
  * @author Rui Gu (https://github.com/jackygurui)
+ * @author Nikita Koksharov
  */
 public class RMapInterceptor {
 
+    private final CommandAsyncExecutor commandAsyncExecutor;
+    private final MapResolver mapResolver;
+    private final Class<?> entityClass;
+
+    public RMapInterceptor(CommandAsyncExecutor commandAsyncExecutor, Class<?> entityClass, MapResolver mapResolver) {
+        this.commandAsyncExecutor = commandAsyncExecutor;
+        this.mapResolver = mapResolver;
+        this.entityClass = entityClass;
+    }
+
     @RuntimeType
-    public static Object intercept(
+    public Object intercept(
             @Origin Method method,
             @AllArguments Object[] args,
-            @FieldValue("liveObjectLiveMap") RMap<?, ?> map
-    ) throws Exception {
-        return method.invoke(map, args);
+            @FieldValue("liveObjectId") Object id,
+            @FieldProxy("liveObjectLiveMap") LiveObjectInterceptor.Setter mapSetter,
+            @FieldProxy("liveObjectLiveMap") LiveObjectInterceptor.Getter mapGetter
+    ) throws Throwable {
+        try {
+            RMap map = mapResolver.resolve(commandAsyncExecutor, entityClass, id, mapSetter, mapGetter);
+            return method.invoke(map, args);
+        } catch (InvocationTargetException e) {
+            throw e.getCause();
+        }
     }
 }

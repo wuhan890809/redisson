@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,22 +16,34 @@
 package org.redisson;
 
 import org.redisson.api.*;
+import org.redisson.api.ExecutorOptions;
+import org.redisson.api.LocalCachedMapOptions;
+import org.redisson.api.MapCacheOptions;
+import org.redisson.api.MapOptions;
+import org.redisson.api.options.*;
 import org.redisson.api.redisnode.*;
 import org.redisson.client.codec.Codec;
+import org.redisson.codec.JsonCodec;
 import org.redisson.command.CommandAsyncExecutor;
-import org.redisson.command.CommandSyncService;
 import org.redisson.config.Config;
-import org.redisson.config.ConfigSupport;
 import org.redisson.connection.ConnectionManager;
+import org.redisson.connection.ServiceManager;
 import org.redisson.eviction.EvictionScheduler;
 import org.redisson.liveobject.core.RedissonObjectBuilder;
 import org.redisson.redisnode.RedissonClusterNodes;
 import org.redisson.redisnode.RedissonMasterSlaveNodes;
 import org.redisson.redisnode.RedissonSentinelMasterSlaveNodes;
 import org.redisson.redisnode.RedissonSingleNode;
-import org.redisson.remote.ResponseEntry;
+import org.redisson.renewal.LockRenewalScheduler;
 import org.redisson.transaction.RedissonTransaction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Set;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
@@ -43,35 +55,35 @@ import java.util.concurrent.TimeUnit;
  * @author Nikita Koksharov
  *
  */
-public class Redisson implements RedissonClient {
+public final class Redisson implements RedissonClient {
 
-    static {
-        RedissonReference.warmUp();
-    }
+    static final Logger log = LoggerFactory.getLogger(Redisson.class);
+    private final Set<Integer> printed = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
-    protected final QueueTransferService queueTransferService = new QueueTransferService();
-    protected final EvictionScheduler evictionScheduler;
-    protected final WriteBehindService writeBehindService;
-    protected final ConnectionManager connectionManager;
-    protected final CommandAsyncExecutor commandExecutor;
+    private final EvictionScheduler evictionScheduler;
+    private final WriteBehindService writeBehindService;
+    private final ConnectionManager connectionManager;
+    private final CommandAsyncExecutor commandExecutor;
 
-    protected final ConcurrentMap<Class<?>, Class<?>> liveObjectClassCache = new ConcurrentHashMap<>();
-    protected final Config config;
+    private final ConcurrentMap<Class<?>, Class<?>> liveObjectClassCache = new ConcurrentHashMap<>();
+    private final Config config;
 
-    protected final ConcurrentMap<String, ResponseEntry> responses = new ConcurrentHashMap<>();
+    Redisson(Config config) {
+        Version.logVersion();
 
-    protected Redisson(Config config) {
         this.config = config;
         Config configCopy = new Config(config);
 
-        connectionManager = ConfigSupport.createConnectionManager(configCopy);
+        connectionManager = ConnectionManager.create(configCopy);
         RedissonObjectBuilder objectBuilder = null;
         if (config.isReferenceEnabled()) {
             objectBuilder = new RedissonObjectBuilder(this);
         }
-        commandExecutor = new CommandSyncService(connectionManager, objectBuilder);
+        commandExecutor = connectionManager.createCommandExecutor(objectBuilder, RedissonObjectBuilder.ReferenceType.DEFAULT);
         evictionScheduler = new EvictionScheduler(commandExecutor);
         writeBehindService = new WriteBehindService(commandExecutor);
+
+        connectionManager.getServiceManager().register(new LockRenewalScheduler(commandExecutor));
     }
 
     public EvictionScheduler getEvictionScheduler() {
@@ -82,8 +94,8 @@ public class Redisson implements RedissonClient {
         return commandExecutor;
     }
 
-    public ConnectionManager getConnectionManager() {
-        return connectionManager;
+    public ServiceManager getServiceManager() {
+        return connectionManager.getServiceManager();
     }
 
     /**
@@ -108,60 +120,48 @@ public class Redisson implements RedissonClient {
         return new Redisson(config);
     }
 
-    /*
-     * Use Redisson.create().rxJava() method instead
-     */
-    @Deprecated
-    public static RedissonRxClient createRx() {
-        Config config = new Config();
-        config.useSingleServer().setAddress("redis://127.0.0.1:6379");
-        return createRx(config);
-    }
-
-    /*
-     * Use Redisson.create(config).rxJava() method instead
-     */
-    @Deprecated
-    public static RedissonRxClient createRx(Config config) {
-        return new RedissonRx(config);
-    }
-
     @Override
     public RedissonRxClient rxJava() {
-        return new RedissonRx(connectionManager, evictionScheduler, writeBehindService, responses);
-    }
-
-    /*
-     * Use Redisson.create().reactive() method instead
-     */
-    @Deprecated
-    public static RedissonReactiveClient createReactive() {
-        Config config = new Config();
-        config.useSingleServer().setAddress("redis://127.0.0.1:6379");
-        return createReactive(config);
-    }
-
-    /*
-     * Use Redisson.create(config).reactive() method instead
-     */
-    @Deprecated
-    public static RedissonReactiveClient createReactive(Config config) {
-        return new RedissonReactive(config);
+        return new RedissonRx(connectionManager, evictionScheduler, writeBehindService);
     }
 
     @Override
     public RedissonReactiveClient reactive() {
-        return new RedissonReactive(connectionManager, evictionScheduler, writeBehindService, responses);
+        return new RedissonReactive(connectionManager, evictionScheduler, writeBehindService);
     }
 
     @Override
-    public <V> RTimeSeries<V> getTimeSeries(String name) {
+    public <V> RArray<V> getArray(String name) {
+        return new RedissonArray<>(commandExecutor, name);
+    }
+
+    @Override
+    public <V> RArray<V> getArray(String name, Codec codec) {
+        return new RedissonArray<>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <V> RArray<V> getArray(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonArray<>(params.getCodec(), commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public <V, L> RTimeSeries<V, L> getTimeSeries(String name) {
         return new RedissonTimeSeries<>(evictionScheduler, commandExecutor, name);
     }
 
     @Override
-    public <V> RTimeSeries<V> getTimeSeries(String name, Codec codec) {
+    public <V, L> RTimeSeries<V, L> getTimeSeries(String name, Codec codec) {
         return new RedissonTimeSeries<>(codec, evictionScheduler, commandExecutor, name);
+    }
+
+    @Override
+    public <V, L> RTimeSeries<V, L> getTimeSeries(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonTimeSeries<>(params.getCodec(), evictionScheduler,
+                commandExecutor.copy(params),
+                params.getName());
     }
 
     @Override
@@ -171,12 +171,40 @@ public class Redisson implements RedissonClient {
 
     @Override
     public <K, V> RStream<K, V> getStream(String name, Codec codec) {
-        return new RedissonStream<K, V>(codec, commandExecutor, name);
+        return new RedissonStream<>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <K, V> RStream<K, V> getStream(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonStream<>(params.getCodec(), commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public RSearch getSearch() {
+        return new RedissonSearch(null, commandExecutor);
+    }
+
+    @Override
+    public RSearch getSearch(Codec codec) {
+        return new RedissonSearch(codec, commandExecutor);
+    }
+
+    @Override
+    public RSearch getSearch(OptionalOptions options) {
+        OptionalParams params = (OptionalParams) options;
+        return new RedissonSearch(params.getCodec(), commandExecutor.copy(params));
     }
 
     @Override
     public RBinaryStream getBinaryStream(String name) {
         return new RedissonBinaryStream(commandExecutor, name);
+    }
+
+    @Override
+    public RBinaryStream getBinaryStream(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonBinaryStream(commandExecutor.copy(params), params.getName());
     }
 
     @Override
@@ -190,6 +218,13 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RGeo<V> getGeo(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonGeo<>(params.getCodec(), commandExecutor.copy(params),
+                params.getName(), this);
+    }
+
+    @Override
     public <V> RBucket<V> getBucket(String name) {
         return new RedissonBucket<V>(commandExecutor, name);
     }
@@ -200,8 +235,31 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RRateLimiter getRateLimiter(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonRateLimiter(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public RGcra getGcra(String name) {
+        return new RedissonGcra(commandExecutor, name);
+    }
+
+    @Override
+    public RGcra getGcra(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonGcra(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public <V> RBucket<V> getBucket(String name, Codec codec) {
-        return new RedissonBucket<V>(codec, commandExecutor, name);
+        return new RedissonBucket<>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <V> RBucket<V> getBucket(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonBucket<>(params.getCodec(), commandExecutor.copy(params), params.getName());
     }
 
     @Override
@@ -215,6 +273,44 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RBuckets getBuckets(OptionalOptions options) {
+        OptionalParams params = (OptionalParams) options;
+        return new RedissonBuckets(params.getCodec(), commandExecutor.copy(params));
+    }
+
+    @Override
+    public <K, V> RMaps<K, V> getMaps() {
+        return new RedissonMaps<>(commandExecutor);
+    }
+
+    @Override
+    public <K, V> RMaps<K, V> getMaps(Codec codec) {
+        return new RedissonMaps<>(codec, commandExecutor);
+    }
+
+    @Override
+    public <K, V> RMaps<K, V> getMaps(OptionalOptions options) {
+        OptionalParams params = (OptionalParams) options;
+        return new RedissonMaps<>(params.getCodec(), commandExecutor.copy(params));
+    }
+
+    @Override
+    public <V> RJsonBucket<V> getJsonBucket(String name, JsonCodec codec) {
+        return new RedissonJsonBucket<>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <V> RJsonBucket<V> getJsonBucket(JsonBucketOptions<V> options) {
+        JsonBucketParams<V> params = (JsonBucketParams) options;
+        return new RedissonJsonBucket<>(params.getCodec(), commandExecutor.copy(params), params.getName());
+    }
+    
+    @Override
+    public RJsonBuckets getJsonBuckets(JsonCodec codec) {
+        return new RedissonJsonBuckets(codec, commandExecutor);
+    }
+    
+    @Override
     public <V> RHyperLogLog<V> getHyperLogLog(String name) {
         return new RedissonHyperLogLog<V>(commandExecutor, name);
     }
@@ -222,6 +318,12 @@ public class Redisson implements RedissonClient {
     @Override
     public <V> RHyperLogLog<V> getHyperLogLog(String name, Codec codec) {
         return new RedissonHyperLogLog<V>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <V> RHyperLogLog<V> getHyperLogLog(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonHyperLogLog<V>(params.getCodec(), commandExecutor.copy(params), params.getName());
     }
 
     @Override
@@ -235,6 +337,12 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RList<V> getList(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonList<V>(params.getCodec(), commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
     public <K, V> RListMultimap<K, V> getListMultimap(String name) {
         return new RedissonListMultimap<K, V>(commandExecutor, name);
     }
@@ -245,15 +353,66 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <K, V> RListMultimap<K, V> getListMultimap(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonListMultimap<>(params.getCodec(), commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public <K, V> RLocalCachedMapCache<K, V> getLocalCachedMapCache(String name, LocalCachedMapCacheOptions<K, V> options) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
+    }
+
+    @Override
+    public <K, V> RLocalCachedMapCache<K, V> getLocalCachedMapCache(String name, Codec codec, LocalCachedMapCacheOptions<K, V> options) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
+    }
+
+    @Override
     public <K, V> RLocalCachedMap<K, V> getLocalCachedMap(String name, LocalCachedMapOptions<K, V> options) {
-        return new RedissonLocalCachedMap<K, V>(commandExecutor, name,
-                options, evictionScheduler, this, writeBehindService);
+        return getLocalCachedMap(name, null, options);
     }
 
     @Override
     public <K, V> RLocalCachedMap<K, V> getLocalCachedMap(String name, Codec codec, LocalCachedMapOptions<K, V> options) {
         return new RedissonLocalCachedMap<K, V>(codec, commandExecutor, name,
                 options, evictionScheduler, this, writeBehindService);
+    }
+
+    @Override
+    public <K, V> RLocalCachedMap<K, V> getLocalCachedMap(org.redisson.api.options.LocalCachedMapOptions<K, V> options) {
+        LocalCachedMapParams<K, V> params = (LocalCachedMapParams) options;
+
+        LocalCachedMapOptions<K, V> ops = LocalCachedMapOptions.<K, V>defaults()
+                .cacheProvider(LocalCachedMapOptions.CacheProvider.valueOf(params.getCacheProvider().toString()))
+                .cacheSize(params.getCacheSize())
+                .storeMode(LocalCachedMapOptions.StoreMode.valueOf(params.getStoreMode().toString()))
+                .evictionPolicy(LocalCachedMapOptions.EvictionPolicy.valueOf(params.getEvictionPolicy().toString()))
+                .maxIdle(params.getMaxIdleInMillis())
+                .loader(params.getLoader())
+                .loaderAsync(params.getLoaderAsync())
+                .reconnectionStrategy(LocalCachedMapOptions.ReconnectionStrategy.valueOf(params.getReconnectionStrategy().toString()))
+                .storeCacheMiss(params.isStoreCacheMiss())
+                .timeToLive(params.getTimeToLiveInMillis())
+                .syncStrategy(LocalCachedMapOptions.SyncStrategy.valueOf(params.getSyncStrategy().toString()))
+                .useObjectAsCacheKey(params.isUseObjectAsCacheKey())
+                .useTopicPattern(params.isUseTopicPattern())
+                .expirationEventPolicy(LocalCachedMapOptions.ExpirationEventPolicy.valueOf(params.getExpirationEventPolicy().toString()))
+                .writer(params.getWriter())
+                .writerAsync(params.getWriterAsync())
+                .writeBehindDelay(params.getWriteBehindDelay())
+                .writeBehindBatchSize(params.getWriteBehindBatchSize())
+                .writerRetryInterval(Duration.ofMillis(params.getWriteRetryInterval()));
+
+        if (params.getWriteMode() != null) {
+            ops.writeMode(MapOptions.WriteMode.valueOf(params.getWriteMode().toString()));
+        }
+        if (params.getWriteRetryAttempts() > 0) {
+            ops.writerRetryAttempts(params.getWriteRetryAttempts());
+        }
+
+        return new RedissonLocalCachedMap<>(params.getCodec(), commandExecutor.copy(params), params.getName(),
+                ops, evictionScheduler, this, writeBehindService);
     }
 
     @Override
@@ -264,6 +423,62 @@ public class Redisson implements RedissonClient {
     @Override
     public <K, V> RMap<K, V> getMap(String name, MapOptions<K, V> options) {
         return new RedissonMap<K, V>(commandExecutor, name, this, options, writeBehindService);
+    }
+
+    @Override
+    public <K, V> RMap<K, V> getMap(org.redisson.api.options.MapOptions<K, V> options) {
+        MapParams<K, V> params = (MapParams<K, V>) options;
+        MapOptions<K, V> ops = MapOptions.<K, V>defaults()
+                .loader(params.getLoader())
+                .loaderAsync(params.getLoaderAsync())
+                .writer(params.getWriter())
+                .writerAsync(params.getWriterAsync())
+                .writeBehindDelay(params.getWriteBehindDelay())
+                .writeBehindBatchSize(params.getWriteBehindBatchSize())
+                .writerRetryInterval(Duration.ofMillis(params.getWriteRetryInterval()));
+
+        if (params.getWriteMode() != null) {
+            ops.writeMode(MapOptions.WriteMode.valueOf(params.getWriteMode().toString()));
+        }
+        if (params.getWriteRetryAttempts() > 0) {
+            ops.writerRetryAttempts(params.getWriteRetryAttempts());
+        }
+
+        return new RedissonMap<>(params.getCodec(), commandExecutor.copy(params), params.getName(),
+                this, ops, writeBehindService);
+    }
+
+    @Override
+    public <K, V> RMapCacheNative<K, V> getMapCacheNative(String name) {
+        return new RedissonMapCacheNative<>(commandExecutor, name, this, null, null);
+    }
+
+    @Override
+    public <K, V> RMapCacheNative<K, V> getMapCacheNative(String name, Codec codec) {
+        return new RedissonMapCacheNative<>(codec, commandExecutor, name, this, null, null);
+    }
+
+    @Override
+    public <K, V> RMapCacheNative<K, V> getMapCacheNative(org.redisson.api.options.MapOptions<K, V> options) {
+        MapParams<K, V> params = (MapParams<K, V>) options;
+        MapOptions<K, V> ops = MapOptions.<K, V>defaults()
+                .loader(params.getLoader())
+                .loaderAsync(params.getLoaderAsync())
+                .writer(params.getWriter())
+                .writerAsync(params.getWriterAsync())
+                .writeBehindDelay(params.getWriteBehindDelay())
+                .writeBehindBatchSize(params.getWriteBehindBatchSize())
+                .writerRetryInterval(Duration.ofMillis(params.getWriteRetryInterval()));
+
+        if (params.getWriteMode() != null) {
+            ops.writeMode(MapOptions.WriteMode.valueOf(params.getWriteMode().toString()));
+        }
+        if (params.getWriteRetryAttempts() > 0) {
+            ops.writerRetryAttempts(params.getWriteRetryAttempts());
+        }
+
+        return new RedissonMapCacheNative<>(params.getCodec(), commandExecutor.copy(params), params.getName(),
+                this, ops, writeBehindService);
     }
 
     @Override
@@ -282,6 +497,29 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <K, V> RSetMultimapCache<K, V> getSetMultimapCache(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonSetMultimapCache<K, V>(evictionScheduler, params.getCodec(),
+                commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public <K, V> RSetMultimapCacheNative<K, V> getSetMultimapCacheNative(String name) {
+        return new RedissonSetMultimapCacheNative<>(commandExecutor, name);
+    }
+
+    @Override
+    public <K, V> RSetMultimapCacheNative<K, V> getSetMultimapCacheNative(String name, Codec codec) {
+        return new RedissonSetMultimapCacheNative<>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <K, V> RSetMultimapCacheNative<K, V> getSetMultimapCacheNative(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonSetMultimapCacheNative<>(params.getCodec(), commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public <K, V> RListMultimapCache<K, V> getListMultimapCache(String name) {
         return new RedissonListMultimapCache<K, V>(evictionScheduler, commandExecutor, name);
     }
@@ -292,8 +530,38 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <K, V> RListMultimapCache<K, V> getListMultimapCache(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonListMultimapCache<K, V>(evictionScheduler, params.getCodec(),
+                commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public <K, V> RListMultimapCacheNative<K, V> getListMultimapCacheNative(String name) {
+        return new RedissonListMultimapCacheNative<K, V>(commandExecutor, name);
+    }
+
+    @Override
+    public <K, V> RListMultimapCacheNative<K, V> getListMultimapCacheNative(String name, Codec codec) {
+        return new RedissonListMultimapCacheNative<>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <K, V> RListMultimapCacheNative<K, V> getListMultimapCacheNative(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonListMultimapCacheNative<>(params.getCodec(),
+                commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public <K, V> RSetMultimap<K, V> getSetMultimap(String name, Codec codec) {
         return new RedissonSetMultimap<K, V>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <K, V> RSetMultimap<K, V> getSetMultimap(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonSetMultimap<>(params.getCodec(), commandExecutor.copy(params), params.getName());
     }
 
     @Override
@@ -307,12 +575,35 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RSetCache<V> getSetCache(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonSetCache<V>(params.getCodec(), evictionScheduler,
+                commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
+    public <V> RSetCacheNative<V> getSetCacheNative(String name) {
+        return new RedissonSetCacheNative<>(commandExecutor, name, this);
+    }
+
+    @Override
+    public <V> RSetCacheNative<V> getSetCacheNative(String name, Codec codec) {
+        return new RedissonSetCacheNative<>(codec, commandExecutor, name, this);
+    }
+
+    @Override
+    public <V> RSetCacheNative<V> getSetCacheNative(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonSetCacheNative<>(params.getCodec(), commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
     public <K, V> RMapCache<K, V> getMapCache(String name) {
         return new RedissonMapCache<K, V>(evictionScheduler, commandExecutor, name, this, null, null);
     }
 
     @Override
-    public <K, V> RMapCache<K, V> getMapCache(String name, MapOptions<K, V> options) {
+    public <K, V> RMapCache<K, V> getMapCache(String name, MapCacheOptions<K, V> options) {
         return new RedissonMapCache<K, V>(evictionScheduler, commandExecutor, name, this, options, writeBehindService);
     }
 
@@ -322,8 +613,39 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
-    public <K, V> RMapCache<K, V> getMapCache(String name, Codec codec, MapOptions<K, V> options) {
+    public <K, V> RMapCache<K, V> getMapCache(String name, Codec codec, MapCacheOptions<K, V> options) {
         return new RedissonMapCache<K, V>(codec, evictionScheduler, commandExecutor, name, this, options, writeBehindService);
+    }
+
+    @Override
+    public <K, V> RMapCache<K, V> getMapCache(org.redisson.api.options.MapCacheOptions<K, V> options) {
+        MapCacheParams<K, V> params = (MapCacheParams<K, V>) options;
+        MapCacheOptions<K, V> ops = createOptions(params);
+        return new RedissonMapCache<>(params.getCodec(), evictionScheduler,
+                commandExecutor.copy(params), params.getName(), this, ops, writeBehindService);
+    }
+
+    private static <K, V> MapCacheOptions<K, V> createOptions(MapCacheParams<K, V> params) {
+        MapCacheOptions<K, V> ops = MapCacheOptions.<K, V>defaults()
+                .loader(params.getLoader())
+                .loaderAsync(params.getLoaderAsync())
+                .writer(params.getWriter())
+                .writerAsync(params.getWriterAsync())
+                .writeBehindDelay(params.getWriteBehindDelay())
+                .writeBehindBatchSize(params.getWriteBehindBatchSize())
+                .writerRetryInterval(Duration.ofMillis(params.getWriteRetryInterval()));
+
+        if (params.getWriteMode() != null) {
+            ops.writeMode(MapOptions.WriteMode.valueOf(params.getWriteMode().toString()));
+        }
+        if (params.getWriteRetryAttempts() > 0) {
+            ops.writerRetryAttempts(params.getWriteRetryAttempts());
+        }
+
+        if (params.isRemoveEmptyEvictionTask()) {
+            ops.removeEmptyEvictionTask();
+        }
+        return ops;
     }
 
     @Override
@@ -342,6 +664,12 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RLock getLock(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonLock(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public RLock getSpinLock(String name) {
         return getSpinLock(name, LockOptions.defaults());
     }
@@ -352,12 +680,42 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RLock getNonReentrantLock(String name) {
+        return new RedissonNonReentrantLock(commandExecutor, name);
+    }
+
+    @Override
+    public RLock getNonReentrantLock(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonNonReentrantLock(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public RFencedLock getFencedLock(String name) {
+        return new RedissonFencedLock(commandExecutor, name);
+    }
+
+    @Override
+    public RFencedLock getFencedLock(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonFencedLock(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public RLock getMultiLock(RLock... locks) {
         return new RedissonMultiLock(locks);
     }
-    
+
+    @Override
+    public RLock getMultiLock(String group, Collection<Object> values) {
+        return new RedissonFasterMultiLock(commandExecutor, group, values);
+    }
+
     @Override
     public RLock getRedLock(RLock... locks) {
+        if (printed.add(1)) {
+            log.error("RedLock object is deprecated. Use RLock or RFencedLock object instead.");
+        }
         return new RedissonRedLock(locks);
     }
 
@@ -367,8 +725,31 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RLock getFairLock(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonFairLock(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public RLock getNonReentrantFairLock(String name) {
+        return new RedissonNonReentrantFairLock(commandExecutor, name);
+    }
+
+    @Override
+    public RLock getNonReentrantFairLock(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonNonReentrantFairLock(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public RReadWriteLock getReadWriteLock(String name) {
         return new RedissonReadWriteLock(commandExecutor, name);
+    }
+
+    @Override
+    public RReadWriteLock getReadWriteLock(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonReadWriteLock(commandExecutor.copy(params), params.getName());
     }
 
     @Override
@@ -382,6 +763,28 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RSet<V> getSet(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonSet<V>(params.getCodec(), commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
+    public RFunction getFunction() {
+        return new RedissonFuction(commandExecutor);
+    }
+
+    @Override
+    public RFunction getFunction(Codec codec) {
+        return new RedissonFuction(commandExecutor, codec);
+    }
+
+    @Override
+    public RFunction getFunction(OptionalOptions options) {
+        OptionalParams params = (OptionalParams) options;
+        return new RedissonFuction(commandExecutor.copy(params), params.getCodec());
+    }
+
+    @Override
     public RScript getScript() {
         return new RedissonScript(commandExecutor);
     }
@@ -392,13 +795,52 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RScript getScript(OptionalOptions options) {
+        OptionalParams params = (OptionalParams) options;
+        return new RedissonScript(commandExecutor.copy(params), params.getCodec());
+    }
+
+    @Override
+    public RTimeSeriesNative getTimeSeriesNative(String name) {
+        return new RedissonTimeSeriesNative(commandExecutor, name);
+    }
+
+    @Override
+    public RTimeSeriesNative getTimeSeriesNative(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonTimeSeriesNative(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public RTimeSeriesNatives getTimeSeriesNatives() {
+        return new RedissonTimeSeriesNatives(commandExecutor);
+    }
+
+    @Override
+    public RTimeSeriesNatives getTimeSeriesNatives(OptionalOptions options) {
+        OptionalParams params = (OptionalParams) options;
+        return new RedissonTimeSeriesNatives(commandExecutor.copy(params));
+    }
+
+    @Override
+    public RVectorSet getVectorSet(String name) {
+        return new RedissonVectorSet(commandExecutor, name);
+    }
+
+    @Override
+    public RVectorSet getVectorSet(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonVectorSet(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public RScheduledExecutorService getExecutorService(String name) {
-        return getExecutorService(name, connectionManager.getCodec());
+        return getExecutorService(name, connectionManager.getServiceManager().getCfg().getCodec());
     }
 
     @Override
     public RScheduledExecutorService getExecutorService(String name, ExecutorOptions options) {
-        return getExecutorService(name, connectionManager.getCodec(), options);
+        return getExecutorService(name, connectionManager.getServiceManager().getCfg().getCodec(), options);
     }
 
     @Override
@@ -408,17 +850,27 @@ public class Redisson implements RedissonClient {
 
     @Override
     public RScheduledExecutorService getExecutorService(String name, Codec codec, ExecutorOptions options) {
-        return new RedissonExecutorService(codec, commandExecutor, this, name, queueTransferService, responses, options);
+        return new RedissonExecutorService(codec, commandExecutor, this, name, options);
+    }
+
+    @Override
+    public RScheduledExecutorService getExecutorService(org.redisson.api.options.ExecutorOptions options) {
+        ExecutorParams params = (ExecutorParams) options;
+        ExecutorOptions ops = ExecutorOptions.defaults()
+                                            .idGenerator(params.getIdGenerator())
+                                            .taskRetryInterval(params.getTaskRetryInterval(), TimeUnit.MILLISECONDS);
+        return new RedissonExecutorService(params.getCodec(),
+                commandExecutor.copy(params), this, params.getName(), ops);
     }
 
     @Override
     public RRemoteService getRemoteService() {
-        return getRemoteService("redisson_rs", connectionManager.getCodec());
+        return getRemoteService("redisson_rs", connectionManager.getServiceManager().getCfg().getCodec());
     }
 
     @Override
     public RRemoteService getRemoteService(String name) {
-        return getRemoteService(name, connectionManager.getCodec());
+        return getRemoteService(name, connectionManager.getServiceManager().getCfg().getCodec());
     }
 
     @Override
@@ -428,11 +880,22 @@ public class Redisson implements RedissonClient {
 
     @Override
     public RRemoteService getRemoteService(String name, Codec codec) {
-        String executorId = connectionManager.getId();
-        if (codec != connectionManager.getCodec()) {
+        String executorId = connectionManager.getServiceManager().getId();
+        if (codec != connectionManager.getServiceManager().getCfg().getCodec()) {
             executorId = executorId + ":" + name;
         }
-        return new RedissonRemoteService(codec, name, commandExecutor, executorId, responses);
+        return new RedissonRemoteService(codec, name, commandExecutor, executorId);
+    }
+
+    @Override
+    public RRemoteService getRemoteService(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        String executorId = connectionManager.getServiceManager().getId();
+        if (params.getCodec() != null
+                && params.getCodec() != connectionManager.getServiceManager().getCfg().getCodec()) {
+            executorId = executorId + ":" + params.getName();
+        }
+        return new RedissonRemoteService(params.getCodec(), params.getName(), commandExecutor.copy(params), executorId);
     }
 
     @Override
@@ -446,6 +909,13 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RSortedSet<V> getSortedSet(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonSortedSet<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
     public <V> RScoredSortedSet<V> getScoredSortedSet(String name) {
         return new RedissonScoredSortedSet<V>(commandExecutor, name, this);
     }
@@ -456,8 +926,37 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RScoredSortedSet<V> getScoredSortedSet(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonScoredSortedSet<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
     public RLexSortedSet getLexSortedSet(String name) {
         return new RedissonLexSortedSet(commandExecutor, name, this);
+    }
+
+    @Override
+    public RLexSortedSet getLexSortedSet(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonLexSortedSet(commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
+    public RShardedTopic getShardedTopic(String name) {
+        return new RedissonShardedTopic(commandExecutor, name);
+    }
+
+    @Override
+    public RShardedTopic getShardedTopic(String name, Codec codec) {
+        return new RedissonShardedTopic(codec, commandExecutor, name);
+    }
+
+    @Override
+    public RShardedTopic getShardedTopic(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonShardedTopic(params.getCodec(), commandExecutor.copy(params), params.getName());
     }
 
     @Override
@@ -471,6 +970,12 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RTopic getTopic(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonTopic(params.getCodec(), commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public RReliableTopic getReliableTopic(String name) {
         return new RedissonReliableTopic(commandExecutor, name);
     }
@@ -478,6 +983,28 @@ public class Redisson implements RedissonClient {
     @Override
     public RReliableTopic getReliableTopic(String name, Codec codec) {
         return new RedissonReliableTopic(codec, commandExecutor, name);
+    }
+
+    @Override
+    public RReliableTopic getReliableTopic(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonReliableTopic(params.getCodec(),
+                commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public <V> RReliablePubSubTopic<V> getReliablePubSubTopic(String name) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
+    }
+
+    @Override
+    public <V> RReliablePubSubTopic<V> getReliablePubSubTopic(String name, Codec codec) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
+    }
+
+    @Override
+    public <V> RReliablePubSubTopic<V> getReliablePubSubTopic(PlainOptions options) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
     }
 
     @Override
@@ -491,11 +1018,36 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RPatternTopic getPatternTopic(PatternTopicOptions options) {
+        PatternTopicParams params = (PatternTopicParams) options;
+        return new RedissonPatternTopic(params.getCodec(), commandExecutor.copy(params), params.getPattern());
+    }
+
+    @Override
     public <V> RDelayedQueue<V> getDelayedQueue(RQueue<V> destinationQueue) {
+        if (printed.add(2)) {
+            log.error("RDelayedQueue object is deprecated due to github issues #3020, #2998, #1057. Use RReliableQueue object instead.");
+        }
+
         if (destinationQueue == null) {
             throw new NullPointerException();
         }
-        return new RedissonDelayedQueue<V>(queueTransferService, destinationQueue.getCodec(), commandExecutor, destinationQueue.getName());
+        return new RedissonDelayedQueue<V>(destinationQueue.getCodec(), commandExecutor, destinationQueue.getName());
+    }
+
+    @Override
+    public <V> RReliableQueue<V> getReliableQueue(String name) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
+    }
+
+    @Override
+    public <V> RReliableQueue<V> getReliableQueue(String name, Codec codec) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
+    }
+
+    @Override
+    public <V> RReliableQueue<V> getReliableQueue(PlainOptions options) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
     }
 
     @Override
@@ -506,6 +1058,13 @@ public class Redisson implements RedissonClient {
     @Override
     public <V> RQueue<V> getQueue(String name, Codec codec) {
         return new RedissonQueue<V>(codec, commandExecutor, name, this);
+    }
+
+    @Override
+    public <V> RQueue<V> getQueue(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonQueue<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
     }
 
     @Override
@@ -523,6 +1082,15 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RTransferQueue<V> getTransferQueue(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        String remoteName = RedissonObject.suffixName(params.getName(), "remoteService");
+        RRemoteService service = getRemoteService(remoteName);
+        return new RedissonTransferQueue<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), service);
+    }
+
+    @Override
     public <V> RRingBuffer<V> getRingBuffer(String name) {
         return new RedissonRingBuffer<V>(commandExecutor, name, this);
     }
@@ -531,7 +1099,30 @@ public class Redisson implements RedissonClient {
     public <V> RRingBuffer<V> getRingBuffer(String name, Codec codec) {
         return new RedissonRingBuffer<V>(codec, commandExecutor, name, this);
     }
-    
+
+    @Override
+    public <V> RRingBuffer<V> getRingBuffer(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonRingBuffer<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
+    public <V> RCircularBuffer<V> getCircularBuffer(String name) {
+        return new RedissonCircularBuffer<>(commandExecutor, name);
+    }
+
+    @Override
+    public <V> RCircularBuffer<V> getCircularBuffer(String name, Codec codec) {
+        return new RedissonCircularBuffer<>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <V> RCircularBuffer<V> getCircularBuffer(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonCircularBuffer<>(params.getCodec(), commandExecutor.copy(params), params.getName());
+    }
+
     @Override
     public <V> RBlockingQueue<V> getBlockingQueue(String name) {
         return new RedissonBlockingQueue<V>(commandExecutor, name, this);
@@ -543,13 +1134,39 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RBlockingQueue<V> getBlockingQueue(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonBlockingQueue<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
     public <V> RBoundedBlockingQueue<V> getBoundedBlockingQueue(String name) {
+        if (printed.add(5)) {
+            log.error("RBoundedBlockingQueue object is deprecated due to github issues #3979, #3835, #4481, #5104, #5575, #5653. Instead, use the RReliableQueue object with delay feature.");
+        }
+
         return new RedissonBoundedBlockingQueue<V>(commandExecutor, name, this);
     }
 
     @Override
     public <V> RBoundedBlockingQueue<V> getBoundedBlockingQueue(String name, Codec codec) {
+        if (printed.add(4)) {
+            log.error("RBoundedBlockingQueue object is deprecated due to github issues #3979, #3835, #4481, #5104, #5575, #5653. Instead, use the RReliableQueue object with delay feature.");
+        }
+
         return new RedissonBoundedBlockingQueue<V>(codec, commandExecutor, name, this);
+    }
+
+    @Override
+    public <V> RBoundedBlockingQueue<V> getBoundedBlockingQueue(PlainOptions options) {
+        if (printed.add(3)) {
+            log.error("RBoundedBlockingQueue object is deprecated due to github issues #3979, #3835, #4481, #5104, #5575, #5653. Instead, use the RReliableQueue object with delay feature.");
+        }
+
+        PlainParams params = (PlainParams) options;
+        return new RedissonBoundedBlockingQueue<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
     }
 
     @Override
@@ -563,6 +1180,13 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RDeque<V> getDeque(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonDeque<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
     public <V> RBlockingDeque<V> getBlockingDeque(String name) {
         return new RedissonBlockingDeque<V>(commandExecutor, name, this);
     }
@@ -570,11 +1194,24 @@ public class Redisson implements RedissonClient {
     @Override
     public <V> RBlockingDeque<V> getBlockingDeque(String name, Codec codec) {
         return new RedissonBlockingDeque<V>(codec, commandExecutor, name, this);
-    };
+    }
+
+    @Override
+    public <V> RBlockingDeque<V> getBlockingDeque(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonBlockingDeque<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
+    }
 
     @Override
     public RAtomicLong getAtomicLong(String name) {
         return new RedissonAtomicLong(commandExecutor, name);
+    }
+
+    @Override
+    public RAtomicLong getAtomicLong(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonAtomicLong(commandExecutor.copy(params), params.getName());
     }
 
     @Override
@@ -583,8 +1220,20 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RLongAdder getLongAdder(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonLongAdder(commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
     public RDoubleAdder getDoubleAdder(String name) {
         return new RedissonDoubleAdder(commandExecutor, name, this);
+    }
+
+    @Override
+    public RDoubleAdder getDoubleAdder(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonDoubleAdder(commandExecutor.copy(params), params.getName(), this);
     }
 
     @Override
@@ -593,8 +1242,20 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RAtomicDouble getAtomicDouble(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonAtomicDouble(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public RCountDownLatch getCountDownLatch(String name) {
         return new RedissonCountDownLatch(commandExecutor, name);
+    }
+
+    @Override
+    public RCountDownLatch getCountDownLatch(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonCountDownLatch(commandExecutor.copy(params), params.getName());
     }
 
     @Override
@@ -603,13 +1264,46 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RBitSet getBitSet(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonBitSet(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public <K> RBitVectorStore<K> getBitVectorStore(String name) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
+    }
+
+    @Override
+    public <K> RBitVectorStore<K> getBitVectorStore(String name, Codec codec) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
+    }
+
+    @Override
+    public <K> RBitVectorStore<K> getBitVectorStore(PlainOptions options) {
+        throw new UnsupportedOperationException("This feature is implemented in the Redisson PRO version. Please refer to https://redisson.pro/feature-comparison.html");
+    }
+
+    @Override
     public RSemaphore getSemaphore(String name) {
         return new RedissonSemaphore(commandExecutor, name);
     }
 
     @Override
+    public RSemaphore getSemaphore(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonSemaphore(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public RPermitExpirableSemaphore getPermitExpirableSemaphore(String name) {
         return new RedissonPermitExpirableSemaphore(commandExecutor, name);
+    }
+
+    @Override
+    public RPermitExpirableSemaphore getPermitExpirableSemaphore(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonPermitExpirableSemaphore(commandExecutor.copy(params), params.getName());
     }
 
     @Override
@@ -623,13 +1317,110 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RBloomFilter<V> getBloomFilter(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonBloomFilter<V>(params.getCodec(), commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public <V> RBloomFilterNative<V> getBloomFilterNative(String name) {
+        return new RedissonBloomFilterNative<V>(commandExecutor, name);
+    }
+
+    @Override
+    public <V> RBloomFilterNative<V> getBloomFilterNative(String name, Codec codec) {
+        return new RedissonBloomFilterNative<V>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <V> RCuckooFilter<V> getCuckooFilter(String name) {
+        return getCuckooFilter(name, null);
+    }
+
+    @Override
+    public <V> RCuckooFilter<V> getCuckooFilter(String name, Codec codec) {
+        return new RedissonCuckooFilter<V>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <V> RCuckooFilter<V> getCuckooFilter(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonCuckooFilter<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public <V> RCountMin<V> getCountMin(String name) {
+        return getCountMin(name, null);
+    }
+
+    @Override
+    public <V> RCountMin<V> getCountMin(String name, Codec codec) {
+        return new RedissonCountMin<V>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <V> RCountMin<V> getCountMin(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonCountMin<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public RTDigest getTDigest(String name) {
+        return new RedissonTDigest(commandExecutor, name);
+    }
+
+    @Override
+    public RTDigest getTDigest(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonTDigest(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
+    public <V> RTopK<V> getTopK(String name) {
+        return getTopK(name, null);
+    }
+
+    @Override
+    public <V> RTopK<V> getTopK(String name, Codec codec) {
+        return new RedissonTopK<V>(codec, commandExecutor, name);
+    }
+
+    @Override
+    public <V> RTopK<V> getTopK(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonTopK<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName());
+    }
+
+
+    @Override
+    public <V> RBloomFilterNative<V> getBloomFilterNative(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonBloomFilterNative<V>(params.getCodec(), commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public RIdGenerator getIdGenerator(String name) {
         return new RedissonIdGenerator(commandExecutor, name);
     }
 
     @Override
+    public RIdGenerator getIdGenerator(CommonOptions options) {
+        CommonParams params = (CommonParams) options;
+        return new RedissonIdGenerator(commandExecutor.copy(params), params.getName());
+    }
+
+    @Override
     public RKeys getKeys() {
         return new RedissonKeys(commandExecutor);
+    }
+
+    @Override
+    public RKeys getKeys(KeysOptions options) {
+        KeysParams params = (KeysParams) options;
+        return new RedissonKeys(commandExecutor.copy(params));
     }
 
     @Override
@@ -653,14 +1444,43 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public RLiveObjectService getLiveObjectService(LiveObjectOptions options) {
+        LiveObjectParams params = (LiveObjectParams) options;
+        return new RedissonLiveObjectService(liveObjectClassCache, commandExecutor.copy(params));
+    }
+
+    @Override
+    public RClientSideCaching getClientSideCaching(ClientSideCachingOptions options) {
+        if (!getServiceManager().isResp3()) {
+            throw new IllegalStateException("'protocol' config setting should be set to RESP3 value. "
+                    + System.lineSeparator() + System.lineSeparator() +
+                    "NOTE: client side caching feature invalidates whole Map per entry change which is ineffective. " +
+                    "Use local cached https://redisson.org/docs/data-and-services/collections/#eviction-local-cache-and-data-partitioning or https://redisson.org/docs/data-and-services/collections/#local-cache instead.");
+        }
+        return new RedissonClientSideCaching(commandExecutor, options);
+    }
+
+    @Override
     public void shutdown() {
+        writeBehindService.stop();
         connectionManager.shutdown();
     }
 
+    @Override
+    public CompletionStage<Void> shutdownAsync() {
+        return shutdownAsync(Duration.ZERO, Duration.ofSeconds(2));
+    }
 
     @Override
     public void shutdown(long quietPeriod, long timeout, TimeUnit unit) {
+        writeBehindService.stop();
         connectionManager.shutdown(quietPeriod, timeout, unit);
+    }
+
+    @Override
+    public CompletionStage<Void> shutdownAsync(Duration quietPeriod, Duration timeout) {
+        writeBehindService.stop();
+        return connectionManager.shutdownAsync(quietPeriod.toNanos(), timeout.toNanos(), TimeUnit.NANOSECONDS);
     }
 
     @Override
@@ -698,26 +1518,13 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
-    public NodesGroup<Node> getNodesGroup() {
-        return new RedisNodes<Node>(connectionManager, commandExecutor);
-    }
-
-    @Override
-    public ClusterNodesGroup getClusterNodesGroup() {
-        if (!connectionManager.isClusterMode()) {
-            throw new IllegalStateException("Redisson is not in cluster mode!");
-        }
-        return new RedisClusterNodes(connectionManager, commandExecutor);
-    }
-
-    @Override
     public boolean isShutdown() {
-        return connectionManager.isShutdown();
+        return connectionManager.getServiceManager().isShutdown();
     }
 
     @Override
     public boolean isShuttingDown() {
-        return connectionManager.isShuttingDown();
+        return connectionManager.getServiceManager().isShuttingDown();
     }
 
     @Override
@@ -731,6 +1538,13 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RPriorityQueue<V> getPriorityQueue(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonPriorityQueue<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
     public <V> RPriorityBlockingQueue<V> getPriorityBlockingQueue(String name) {
         return new RedissonPriorityBlockingQueue<V>(commandExecutor, name, this);
     }
@@ -738,6 +1552,13 @@ public class Redisson implements RedissonClient {
     @Override
     public <V> RPriorityBlockingQueue<V> getPriorityBlockingQueue(String name, Codec codec) {
         return new RedissonPriorityBlockingQueue<V>(codec, commandExecutor, name, this);
+    }
+
+    @Override
+    public <V> RPriorityBlockingQueue<V> getPriorityBlockingQueue(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonPriorityBlockingQueue<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
     }
 
     @Override
@@ -750,6 +1571,12 @@ public class Redisson implements RedissonClient {
         return new RedissonPriorityBlockingDeque<V>(codec, commandExecutor, name, this);
     }
 
+    @Override
+    public <V> RPriorityBlockingDeque<V> getPriorityBlockingDeque(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonPriorityBlockingDeque<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
+    }
 
     @Override
     public <V> RPriorityDeque<V> getPriorityDeque(String name) {
@@ -762,8 +1589,15 @@ public class Redisson implements RedissonClient {
     }
 
     @Override
+    public <V> RPriorityDeque<V> getPriorityDeque(PlainOptions options) {
+        PlainParams params = (PlainParams) options;
+        return new RedissonPriorityDeque<V>(params.getCodec(),
+                commandExecutor.copy(params), params.getName(), this);
+    }
+
+    @Override
     public String getId() {
-        return connectionManager.getId();
+        return connectionManager.getServiceManager().getId();
     }
 
 }

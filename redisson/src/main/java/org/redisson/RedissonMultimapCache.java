@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,15 +15,16 @@
  */
 package org.redisson;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-
 import org.redisson.api.RFuture;
 import org.redisson.api.RObject;
 import org.redisson.client.codec.LongCodec;
 import org.redisson.client.protocol.RedisCommands;
 import org.redisson.command.CommandAsyncExecutor;
+import org.redisson.eviction.EvictionScheduler;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 
@@ -31,24 +32,30 @@ import org.redisson.command.CommandAsyncExecutor;
  *
  * @param <K> key type
  */
-public class RedissonMultimapCache<K> {
+class RedissonMultimapCache<K> {
 
     private final CommandAsyncExecutor commandExecutor;
-    private final RObject object;
+    private final RedissonObject object;
     private final String timeoutSetName;
     private final String prefix;
+    private final EvictionScheduler evictionScheduler;
     
-    public RedissonMultimapCache(CommandAsyncExecutor commandExecutor, RObject object, String timeoutSetName, String prefix) {
+    RedissonMultimapCache(CommandAsyncExecutor commandExecutor, EvictionScheduler evictionScheduler,
+                          RObject object, String timeoutSetName, String prefix) {
         this.commandExecutor = commandExecutor;
-        this.object = object;
+        this.object = (RedissonObject) object;
         this.timeoutSetName = timeoutSetName;
         this.prefix = prefix;
+        this.evictionScheduler = evictionScheduler;
+        if (evictionScheduler != null) {
+            evictionScheduler.scheduleCleanMultimap(((RedissonObject) object).getRawName(), timeoutSetName);
+        }
     }
 
     public RFuture<Boolean> expireKeyAsync(K key, long timeToLive, TimeUnit timeUnit) {
         long ttlTimeout = System.currentTimeMillis() + timeUnit.toMillis(timeToLive);
 
-        return commandExecutor.evalWriteAsync(((RedissonObject) object).getRawName(), object.getCodec(), RedisCommands.EVAL_BOOLEAN,
+        return commandExecutor.evalWriteAsync(object.getRawName(), object.getCodec(), RedisCommands.EVAL_BOOLEAN,
                 "if redis.call('hexists', KEYS[1], ARGV[2]) == 1 then "
                     + "if tonumber(ARGV[1]) > 0 then "
                         + "redis.call('zadd', KEYS[2], ARGV[1], ARGV[2]); " +
@@ -59,17 +66,17 @@ public class RedissonMultimapCache<K> {
               + "else "
                 + "return 0; "
               + "end",
-            Arrays.<Object>asList(((RedissonObject) object).getRawName(), timeoutSetName),
-            ttlTimeout, ((RedissonObject) object).encodeMapKey(key));
+            Arrays.asList(object.getRawName(), timeoutSetName),
+            ttlTimeout, object.encodeMapKey(key));
     }
     
     public RFuture<Long> sizeInMemoryAsync() {
-        List<Object> keys = Arrays.<Object>asList(((RedissonObject) object).getRawName(), timeoutSetName);
-        return ((RedissonObject) object).sizeInMemoryAsync(keys);
+        List<Object> keys = Arrays.asList(object.getRawName(), timeoutSetName);
+        return object.sizeInMemoryAsync(keys);
     }
     
     public RFuture<Boolean> deleteAsync() {
-        return commandExecutor.evalWriteAsync(((RedissonObject) object).getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN_AMOUNT,
+        return commandExecutor.evalWriteAsync(object.getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN_AMOUNT,
                 "local entries = redis.call('hgetall', KEYS[1]); " +
                 "local keys = {KEYS[1], KEYS[2]}; " +
                 "for i, v in ipairs(entries) do " +
@@ -84,44 +91,97 @@ public class RedissonMultimapCache<K> {
                     + "n = n + redis.call('del', unpack(keys, i, math.min(i+4999, table.getn(keys)))) "
                 + "end; "
                 + "return n;",
-                Arrays.<Object>asList(((RedissonObject) object).getRawName(), timeoutSetName),
+                Arrays.asList(object.getRawName(), timeoutSetName),
                 prefix);
     }
 
-    public RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit) {
-        return commandExecutor.evalWriteAsync(((RedissonObject) object).getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+    public RFuture<Boolean> blessKeysAsync(String subcommand) {
+        return commandExecutor.evalWriteAsync(object.getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+                "local entries = redis.call('hgetall', KEYS[1]) " +
+                "local keys = {KEYS[1], KEYS[2]} " +
+                "for i, v in ipairs(entries) do " +
+                    "if i % 2 == 0 then " +
+                        "table.insert(keys, ARGV[3] .. v) " +
+                    "end " +
+                "end " +
+
+                "local result = 0 "
+              + "for j = 1, #keys, 1 do "
+                 // An auxiliary key may not exist yet, and BLESS refuses a missing key.
+                + "if redis.call('exists', keys[j]) == 1 then "
+                // get answers 1 only if at least one key exists and every existing key has the flag.
+                    + "if ARGV[1] == 'get' then "
+                        + "local flags = redis.call('bless', 'get', keys[j]) "
+                        + "local found = 0 "
+                        + "for i = 1, #flags, 1 do "
+                            + "if flags[i] == ARGV[2] then "
+                                + "found = 1 "
+                            + "end "
+                        + "end "
+                        + "if found == 0 then "
+                            + "return 0 "
+                        + "end "
+                        + "result = 1 "
+                        // set and clear answer 1 if any key changed.
+                    + "elseif redis.call('bless', ARGV[1], keys[j], ARGV[2]) == 1 then "
+                        + "result = 1 "
+                    + "end "
+                + "end "
+            + "end "
+            + "return result",
+                Arrays.asList(object.getRawName(), timeoutSetName), subcommand, RedissonObject.NO_EVICT, prefix);
+    }
+
+    public RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit, String param) {
+        return commandExecutor.evalWriteAsync(object.getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
                 "redis.call('zadd', KEYS[2], 92233720368547758, 'redisson__expiretag'); " +
                 "local entries = redis.call('hgetall', KEYS[1]); " +
                 "for i, v in ipairs(entries) do " +
                     "if i % 2 == 0 then " +
-                        "local name = ARGV[2] .. v; " + 
-                        "redis.call('pexpire', name, ARGV[1]); " +
+                        "local name = ARGV[2] .. v; "
+                      + "if ARGV[3] ~= '' then "
+                          + "redis.call('pexpire', name, ARGV[1], ARGV[3]); "
+                      + "else "
+                          + "redis.call('pexpire', name, ARGV[1]); "
+                      + "end; " +
                     "end;" +
                 "end; " +
+                "if ARGV[3] ~= '' then "
+                    + "redis.call('pexpire', KEYS[2], ARGV[1], ARGV[3]); "
+                    + "return redis.call('pexpire', KEYS[1], ARGV[1], ARGV[3]); "
+              + "end; " +
                 "redis.call('pexpire', KEYS[2], ARGV[1]); " +
                 "return redis.call('pexpire', KEYS[1], ARGV[1]); ",
-                Arrays.<Object>asList(((RedissonObject) object).getRawName(), timeoutSetName),
-                timeUnit.toMillis(timeToLive), prefix);
+                Arrays.asList(object.getRawName(), timeoutSetName),
+                timeUnit.toMillis(timeToLive), prefix, param);
     }
 
-    public RFuture<Boolean> expireAtAsync(long timestamp) {
-        return commandExecutor.evalWriteAsync(((RedissonObject) object).getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+    public RFuture<Boolean> expireAtAsync(long timestamp, String param) {
+        return commandExecutor.evalWriteAsync(object.getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
                 "redis.call('zadd', KEYS[2], 92233720368547758, 'redisson__expiretag');" +
                 "local entries = redis.call('hgetall', KEYS[1]); " +
                 "for i, v in ipairs(entries) do " +
                     "if i % 2 == 0 then " +
-                        "local name = ARGV[2] .. v; " + 
-                        "redis.call('pexpireat', name, ARGV[1]); " +
+                        "local name = ARGV[2] .. v; "
+                      + "if ARGV[3] ~= '' then "
+                          + "redis.call('pexpireat', name, ARGV[1], ARGV[3]); "
+                      + "else "
+                          + "redis.call('pexpireat', name, ARGV[1]); "
+                      + "end; " +
                     "end;" +
                 "end; " +
+                "if ARGV[3] ~= '' then "
+                    + "redis.call('pexpireat', KEYS[2], ARGV[1], ARGV[3]); "
+                    + "return redis.call('pexpireat', KEYS[1], ARGV[1], ARGV[3]); "
+              + "end; " +
                 "redis.call('pexpireat', KEYS[2], ARGV[1]); " +
                 "return redis.call('pexpireat', KEYS[1], ARGV[1]); ",
-                Arrays.<Object>asList(((RedissonObject) object).getRawName(), timeoutSetName),
-                timestamp, prefix);
+                Arrays.asList(object.getRawName(), timeoutSetName),
+                timestamp, prefix, param);
     }
 
     public RFuture<Boolean> clearExpireAsync() {
-        return commandExecutor.evalWriteAsync(((RedissonObject) object).getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+        return commandExecutor.evalWriteAsync(object.getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
                 "redis.call('zrem', KEYS[2], 'redisson__expiretag'); " +
                 "local entries = redis.call('hgetall', KEYS[1]); " +
                 "for i, v in ipairs(entries) do " +
@@ -132,9 +192,15 @@ public class RedissonMultimapCache<K> {
                 "end; " +
                 "redis.call('persist', KEYS[2]); " +
                 "return redis.call('persist', KEYS[1]); ",
-                Arrays.<Object>asList(((RedissonObject) object).getRawName(), timeoutSetName),
+                Arrays.asList(object.getRawName(), timeoutSetName),
                 prefix);
     }
 
+    public void destroy() {
+        if (evictionScheduler != null) {
+            evictionScheduler.remove(object.getRawName());
+        }
+        object.removeListeners();
+    }
     
 }

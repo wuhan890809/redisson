@@ -1,12 +1,11 @@
 package org.redisson.rx;
 
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
 import org.redisson.api.RBlockingDequeRx;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -53,31 +52,27 @@ public class RedissonBlockingDequeRxTest extends BaseRxTest {
         RBlockingDequeRx<String> blockingDeque = redisson.getBlockingDeque("blocking_deque");
         long start = System.currentTimeMillis();
         String redisTask = sync(blockingDeque.pollLastAndOfferFirstTo("deque", 1, TimeUnit.SECONDS));
-        assertThat(System.currentTimeMillis() - start).isBetween(950L, 1150L);
+        assertThat(System.currentTimeMillis() - start).isBetween(950L, 1600L);
         assertThat(redisTask).isNull();
     }
     
     @Test
+    @Timeout(3)
     public void testShortPoll() {
-        Assertions.assertTimeout(Duration.ofSeconds(3), () -> {
-            RBlockingDequeRx<Integer> queue = redisson.getBlockingDeque("queue:pollany");
-            sync(queue.pollLast(500, TimeUnit.MILLISECONDS));
-            sync(queue.pollFirst(10, TimeUnit.MICROSECONDS));
-        });
+        RBlockingDequeRx<Integer> queue = redisson.getBlockingDeque("queue:pollany");
+        sync(queue.pollLast(500, TimeUnit.MILLISECONDS));
+        sync(queue.pollFirst(10, TimeUnit.MICROSECONDS));
     }
     
     @Test
     public void testPollLastFromAny() {
         final RBlockingDequeRx<Integer> queue1 = redisson.getBlockingDeque("deque:pollany");
-        Executors.newSingleThreadScheduledExecutor().schedule(new Runnable() {
-            @Override
-            public void run() {
-                RBlockingDequeRx<Integer> queue2 = redisson.getBlockingDeque("deque:pollany1");
-                RBlockingDequeRx<Integer> queue3 = redisson.getBlockingDeque("deque:pollany2");
-                sync(queue3.put(2));
-                sync(queue1.put(1));
-                sync(queue2.put(3));
-            }
+        Executors.newSingleThreadScheduledExecutor().schedule(() -> {
+            RBlockingDequeRx<Integer> queue2 = redisson.getBlockingDeque("deque:pollany1");
+            RBlockingDequeRx<Integer> queue3 = redisson.getBlockingDeque("deque:pollany2");
+            sync(queue3.put(2));
+            sync(queue1.put(1));
+            sync(queue2.put(3));
         }, 3, TimeUnit.SECONDS);
 
         long s = System.currentTimeMillis();

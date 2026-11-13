@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package org.redisson.api;
 
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -29,6 +30,7 @@ public final class TransactionOptions {
     private int retryAttempts = 3;
     private long retryInterval = 1500;
 
+    private int syncSlaves = 0;
     private long syncTimeout = 5000;
     
     private long timeout = 5000;
@@ -87,8 +89,8 @@ public final class TransactionOptions {
      * <p>
      * Default is <code>1500 milliseconds</code>
      * 
-     * @param retryInterval - time interval
-     * @param retryIntervalUnit - time interval unit
+     * @param retryInterval time interval
+     * @param retryIntervalUnit time interval unit
      * @return self instance
      */
     public TransactionOptions retryInterval(long retryInterval, TimeUnit retryIntervalUnit) {
@@ -97,20 +99,46 @@ public final class TransactionOptions {
     }
 
     /**
-     * Synchronization data timeout between Redis master participating in transaction and its slaves.
-     * <p>
-     * Default is <code>5000 milliseconds</code>
-     * 
-     * @param syncTimeout - synchronization timeout
-     * @param syncUnit - synchronization timeout time unit
+     * Use {@link #syncSlaves} method instead.
+     *
+     * @param syncTimeout synchronization timeout
+     * @param syncUnit synchronization timeout time unit
      * @return self instance
      */
+    @Deprecated
     public TransactionOptions syncSlavesTimeout(long syncTimeout, TimeUnit syncUnit) {
         this.syncTimeout = syncUnit.toMillis(syncTimeout);
         return this;
     }
     public long getSyncTimeout() {
         return syncTimeout;
+    }
+
+    /**
+     * Synchronize write operations execution within defined timeout
+     * across specified amount of Redis slave nodes.
+     * <p>
+     * Default slaves value is <code>0</code> which means available slaves
+     * at the moment of execution and <code>-1</code> means no sync at all.
+     * <p>
+     * Default timeout value is <code>5000 milliseconds</code>
+     * NOTE: Redis 3.0+ required
+     *
+     * @param slaves slaves amount for synchronization.
+     *                 Default value is <code>0</code> which means available slaves
+     *                 at the moment of execution and <code>-1</code> means no sync at all.
+     * @param timeout synchronization timeout
+     * @param unit synchronization timeout time unit
+     * @return self instance
+     */
+    public TransactionOptions syncSlaves(int slaves, long timeout, TimeUnit unit) {
+        this.syncSlaves = slaves;
+        this.syncTimeout = unit.toMillis(timeout);
+        return this;
+    }
+
+    public int getSyncSlaves() {
+        return syncSlaves;
     }
 
     public long getTimeout() {
@@ -134,6 +162,21 @@ public final class TransactionOptions {
         this.timeout = timeoutUnit.toMillis(timeout);
         return this;
     }
- 
-    
+
+    @Override
+    public boolean equals(Object o) {
+        if (o == null || getClass() != o.getClass()) return false;
+        TransactionOptions that = (TransactionOptions) o;
+        return responseTimeout == that.responseTimeout
+                    && retryAttempts == that.retryAttempts
+                        && retryInterval == that.retryInterval
+                            && syncSlaves == that.syncSlaves
+                                && syncTimeout == that.syncTimeout
+                                    && timeout == that.timeout;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(responseTimeout, retryAttempts, retryInterval, syncSlaves, syncTimeout, timeout);
+    }
 }

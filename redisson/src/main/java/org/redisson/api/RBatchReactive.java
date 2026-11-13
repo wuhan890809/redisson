@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package org.redisson.api;
 
 import org.redisson.client.codec.Codec;
+import org.redisson.codec.JsonCodec;
 import reactor.core.publisher.Mono;
 
 /**
@@ -30,6 +31,144 @@ import reactor.core.publisher.Mono;
  *
  */
 public interface RBatchReactive {
+
+    /**
+     * Returns Array instance by <code>name</code>.
+     * <p>
+     * Requires <b>Redis 8.8 or higher.</b>
+     *
+     * @param <V> value type
+     * @param name name of instance
+     * @return RArray object
+     */
+    <V> RArrayReactive<V> getArray(String name);
+
+    /**
+     * Returns Array instance by <code>name</code>
+     * using provided <code>codec</code> for values.
+     * <p>
+     * Requires <b>Redis 8.8 or higher.</b>
+     *
+     * @param <V> value type
+     * @param name name of instance
+     * @param codec codec for values
+     * @return RArray object
+     */
+    <V> RArrayReactive<V> getArray(String name, Codec codec);
+
+    /**
+     * Returns cuckoo filter instance by <code>name</code>.
+     *
+     * @param <V> type of value
+     * @param name name of object
+     * @return CuckooFilter object
+     */
+    <V> RCuckooFilterReactive<V> getCuckooFilter(String name);
+
+    /**
+     * Returns cuckoo filter instance by <code>name</code>
+     * using provided <code>codec</code> for values.
+     *
+     * @param <V> type of value
+     * @param name name of object
+     * @param codec codec for values
+     * @return CuckooFilter object
+     */
+    <V> RCuckooFilterReactive<V> getCuckooFilter(String name, Codec codec);
+
+    /**
+     * Returns Top-K sketch instance by <code>name</code>.
+     *
+     * @param <V> type of value
+     * @param name name of object
+     * @return TopK object
+     */
+    <V> RTopKReactive<V> getTopK(String name);
+
+    /**
+     * Returns Top-K sketch instance by <code>name</code>
+     * using provided <code>codec</code> for values.
+     *
+     * @param <V> type of value
+     * @param name name of object
+     * @param codec codec for values
+     * @return TopK object
+     */
+    <V> RTopKReactive<V> getTopK(String name, Codec codec);
+
+    /**
+     * Returns count-min sketch instance by <code>name</code>.
+     *
+     * @param <V> type of value
+     * @param name name of object
+     * @return CountMin object
+     */
+    <V> RCountMinReactive<V> getCountMin(String name);
+
+    /**
+     * Returns count-min sketch instance by <code>name</code>
+     * using provided <code>codec</code> for values.
+     *
+     * @param <V> type of value
+     * @param name name of object
+     * @param codec codec for values
+     * @return CountMin object
+     */
+    <V> RCountMinReactive<V> getCountMin(String name, Codec codec);
+
+    /**
+     * Returns t-digest instance by <code>name</code>.
+     *
+     * @param name name of object
+     * @return TDigest object
+     */
+    RTDigestReactive getTDigest(String name);
+
+    /**
+     * Returns vector set instance by name.
+     * Stores vectors and associated elements in a set optimized for similarity search.
+     *
+     * @return RVectorSet object
+     */
+    RVectorSetReactive getVectorSet(String name);
+
+    /**
+     * Returns time series instance by <code>name</code>, backed by the TS.* commands of the
+     * RedisTimeSeries module.
+     * <p>
+     * The iterator methods are meaningless here, as they are on every other object a batch
+     * hands out: walking a series takes one round trip per window, each bounded by what the one
+     * before it returned, and a batch has not sent anything yet.
+     * <p>
+     * There is no codec overload, because samples are timestamps and doubles handled by the
+     * module itself.
+     *
+     * @param name - name of object
+     * @return time series instance
+     */
+    RTimeSeriesNativeReactive getTimeSeriesNative(String name);
+
+    /**
+     * Returns bloom filter native instance by <code>name</code>.
+     * Covers BF.* commands.
+     *
+     * @param <T> type of object
+     * @param name - name of object
+     * @return RBloomFilterNative object
+     */
+    <T> RBloomFilterNativeReactive<T> getBloomFilterNative(String name);
+
+    /**
+     * Returns bloom filter native instance by <code>name</code>
+     * using provided <code>codec</code> for objects.
+     * Covers BF.* commands.
+     *
+     * @param <T> type of object
+     * @param name - name of object
+     * @param codec - codec for values
+     * @return RBloomFilterNative object
+     */
+    <T> RBloomFilterNativeReactive<T> getBloomFilterNative(String name, Codec codec);
 
     /**
      * Returns stream instance by <code>name</code>
@@ -98,7 +237,32 @@ public interface RBatchReactive {
      * @return SetMultimap object
      */
     <K, V> RSetMultimapReactive<K, V> getSetMultimap(String name, Codec codec);
-    
+
+    /**
+     * Returns Set based Multimap cache instance by name.
+     * Supports key eviction by specifying a time to live.
+     * If eviction is not required then it's better to use regular set multimap {@link #getSetMultimap(String)}.
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name - name of object
+     * @return RSetMultimapCacheRx object
+     */
+    <K, V> RSetMultimapCacheReactive<K, V> getSetMultimapCache(String name);
+
+    /**
+     * Returns Set based Multimap cache instance by name using provided codec for both map keys and values.
+     * Supports key eviction by specifying a time to live.
+     * If eviction is not required then it's better to use regular set multimap {@link #getSetMultimap(String, Codec)}.
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name - name of object
+     * @param codec - codec for keys and values
+     * @return RSetMultimapCacheRx object
+     */
+    <K, V> RSetMultimapCacheReactive<K, V> getSetMultimapCache(String name, Codec codec);
+
     /**
      * Returns set-based cache instance by <code>name</code>.
      * Uses map (value_hash, value) under the hood for minimal memory consumption.
@@ -126,6 +290,34 @@ public interface RBatchReactive {
      * @return SetCache object
      */
     <V> RSetCacheReactive<V> getSetCache(String name, Codec codec);
+
+    /**
+     * Returns set instance by <code>name</code>.
+     * Supports value eviction with a given TTL value.
+     * Uses Redis native commands for value expiration and not a scheduled eviction task.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param <V> type of value
+     * @param name name of object
+     * @return SetCacheNative object
+     */
+    <V> RSetCacheNativeReactive<V> getSetCacheNative(String name);
+
+    /**
+     * Returns set instance by <code>name</code>
+     * using provided <code>codec</code> for values.
+     * Supports value eviction with a given TTL value.
+     * Uses Redis native commands for value expiration and not a scheduled eviction task.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param <V> type of value
+     * @param name name of object
+     * @param codec codec for values
+     * @return SetCacheNative object
+     */
+    <V> RSetCacheNativeReactive<V> getSetCacheNative(String name, Codec codec);
 
     /**
      * Returns map-based cache instance by <code>name</code>
@@ -156,6 +348,102 @@ public interface RBatchReactive {
     <K, V> RMapCacheReactive<K, V> getMapCache(String name);
 
     /**
+     * Returns map instance by name.
+     * Supports entry eviction with a given TTL.
+     * <p>
+     * Requires <b>Redis 7.4.0 and higher.</b> or <b>Valkey 9.0.0 and higher.</b>
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name name of object
+     * @return Map object
+     */
+    <K, V> RMapCacheNativeReactive<K, V> getMapCacheNative(String name);
+
+    /**
+     * Returns map instance by name
+     * using provided codec for both map keys and values.
+     * Supports entry eviction with a given TTL.
+     * <p>
+     * Requires <b>Redis 7.4.0 and higher.</b> or <b>Valkey 9.0.0 and higher.</b>
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name name of object
+     * @param codec codec for keys and values
+     * @return Map object
+     */
+    <K, V> RMapCacheNativeReactive<K, V> getMapCacheNative(String name, Codec codec);
+
+    /**
+     * Returns List based Multimap instance by name.
+     * Supports key-entry eviction with a given TTL value.
+     * Stores insertion order and allows duplicates for values mapped to key.
+     * <p>
+     * Uses Redis native commands for entry expiration and not a scheduled eviction task.
+     * <p>
+     * Requires <b>Redis 7.4.0 and higher.</b> or <b>Valkey 9.0.0 and higher.</b>
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name name of object
+     * @return ListMultimapCache object
+     */
+    <K, V> RListMultimapCacheReactive<K, V> getListMultimapCacheNative(String name);
+
+    /**
+     * Returns List based Multimap instance by name
+     * using provided codec for both map keys and values.
+     * Supports key-entry eviction with a given TTL value.
+     * Stores insertion order and allows duplicates for values mapped to key.
+     * <p>
+     * Uses Redis native commands for entry expiration and not a scheduled eviction task.
+     * <p>
+     * Requires <b>Redis 7.4.0 and higher.</b> or <b>Valkey 9.0.0 and higher.</b>
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name name of object
+     * @param codec codec for keys and values
+     * @return ListMultimapCache object
+     */
+    <K, V> RListMultimapCacheReactive<K, V> getListMultimapCacheNative(String name, Codec codec);
+
+    /**
+     * Returns Set based Multimap instance by name.
+     * Supports key-entry eviction with a given TTL value.
+     * Doesn't allow duplications for values mapped to key.
+     * <p>
+     * Uses Redis native commands for entry expiration and not a scheduled eviction task.
+     * <p>
+     * Requires <b>Redis 7.4.0 and higher.</b> or <b>Valkey 9.0.0 and higher.</b>
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name name of object
+     * @return SetMultimapCache object
+     */
+    <K, V> RSetMultimapCacheReactive<K, V> getSetMultimapCacheNative(String name);
+
+    /**
+     * Returns Set based Multimap instance by name
+     * using provided codec for both map keys and values.
+     * Supports key-entry eviction with a given TTL value.
+     * Doesn't allow duplications for values mapped to key.
+     * <p>
+     * Uses Redis native commands for entry expiration and not a scheduled eviction task.
+     * <p>
+     * Requires <b>Redis 7.4.0 and higher.</b> or <b>Valkey 9.0.0 and higher.</b>
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name name of object
+     * @param codec codec for keys and values
+     * @return SetMultimapCache object
+     */
+    <K, V> RSetMultimapCacheReactive<K, V> getSetMultimapCacheNative(String name, Codec codec);
+
+    /**
      * Returns object holder by name
      *
      * @param <V> type of value
@@ -165,6 +453,18 @@ public interface RBatchReactive {
     <V> RBucketReactive<V> getBucket(String name);
 
     <V> RBucketReactive<V> getBucket(String name, Codec codec);
+
+    /**
+     * Returns JSON data holder instance by name using provided codec.
+     *
+     * @see org.redisson.codec.JacksonCodec
+     *
+     * @param <V> type of value
+     * @param name name of object
+     * @param codec codec for values
+     * @return JsonBucket object
+     */
+    <V> RJsonBucketReactive<V> getJsonBucket(String name, JsonCodec codec);
 
     /**
      * Returns HyperLogLog object by name
@@ -209,7 +509,32 @@ public interface RBatchReactive {
      * @return ListMultimap object
      */
     <K, V> RListMultimapReactive<K, V> getListMultimap(String name, Codec codec);
-    
+
+    /**
+     * Returns List based Multimap cache instance by name.
+     * Supports key eviction by specifying a time to live.
+     * If eviction is not required then it's better to use regular list multimap {@link #getListMultimap(String)}.
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name - name of object
+     * @return RListMultimapCacheRx object
+     */
+    <K, V> RListMultimapReactive<K, V> getListMultimapCache(String name);
+
+    /**
+     * Returns List based Multimap cache instance by name using provided codec for both map keys and values.
+     * Supports key eviction by specifying a time to live.
+     * If eviction is not required then it's better to use regular list multimap {@link #getListMultimap(String, Codec)}.
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name - name of object
+     * @param codec - codec for keys and values
+     * @return RListMultimapCacheRx object
+     */
+    <K, V> RListMultimapReactive<K, V> getListMultimapCache(String name, Codec codec);
+
     /**
      * Returns map instance by name.
      *
@@ -221,6 +546,31 @@ public interface RBatchReactive {
     <K, V> RMapReactive<K, V> getMap(String name);
 
     <K, V> RMapReactive<K, V> getMap(String name, Codec codec);
+
+    /**
+     * Returns map instance by name
+     * using provided {@link MapOptions}.
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name - name of object
+     * @param options - map options
+     * @return Map object
+     */
+    <K, V> RMapReactive<K, V> getMap(String name, MapOptions<K, V> options);
+
+    /**
+     * Returns map instance by name
+     * using provided codec for both map keys and values and {@link MapOptions}.
+     *
+     * @param <K> type of key
+     * @param <V> type of value
+     * @param name - name of object
+     * @param codec - codec for keys and values
+     * @param options - map options
+     * @return Map object
+     */
+    <K, V> RMapReactive<K, V> getMap(String name, Codec codec, MapOptions<K, V> options);
 
     /**
      * Returns set instance by name.
@@ -242,6 +592,29 @@ public interface RBatchReactive {
     RTopicReactive getTopic(String name);
 
     RTopicReactive getTopic(String name, Codec codec);
+
+    /**
+     * Returns Sharded Topic instance by name.
+     * <p>
+     * Messages are delivered to message listeners connected to the same Topic.
+     * <p>
+     *
+     * @param name - name of object
+     * @return Topic object
+     */
+    RShardedTopicReactive getShardedTopic(String name);
+
+    /**
+     * Returns Sharded Topic instance by name using provided codec for messages.
+     * <p>
+     * Messages are delivered to message listeners connected to the same Topic.
+     * <p>
+     *
+     * @param name - name of object
+     * @param codec - codec for message
+     * @return Topic object
+     */
+    RShardedTopicReactive getShardedTopic(String name, Codec codec);
 
     /**
      * Returns queue instance by name.
@@ -346,7 +719,22 @@ public interface RBatchReactive {
      * @return Script object
      */
     RScriptReactive getScript(Codec codec);
-    
+
+    /**
+     * Returns interface for Redis Function feature
+     *
+     * @return function object
+     */
+    RFunctionReactive getFunction();
+
+    /**
+     * Returns interface for Redis Function feature using provided codec
+     *
+     * @param codec - codec for params and result
+     * @return function interface
+     */
+    RFunctionReactive getFunction(Codec codec);
+
     /**
      * Returns keys operations.
      * Each of Redis/Redisson object associated with own key
@@ -354,6 +742,21 @@ public interface RBatchReactive {
      * @return Keys object
      */
     RKeysReactive getKeys();
+
+    /**
+     * Returns API for RediSearch module
+     *
+     * @return RSearchReactive object
+     */
+    RSearchReactive getSearch();
+
+    /**
+     * Returns API for RediSearch module using defined codec for attribute values.
+     *
+     * @param codec codec for entry
+     * @return RSearchReactive object
+     */
+    RSearchReactive getSearch(Codec codec);
 
     /**
      * Executes all operations accumulated during Reactive methods invocations Reactivehronously.
@@ -364,5 +767,12 @@ public interface RBatchReactive {
      * @return List with result object for each command
      */
     Mono<BatchResult<?>> execute();
+
+    /**
+     * Discard batched commands and release allocated buffers used for parameters encoding.
+     *
+     * @return void
+     */
+    Mono<Void> discard();
 
 }

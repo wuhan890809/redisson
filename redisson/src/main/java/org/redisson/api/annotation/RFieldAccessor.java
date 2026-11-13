@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,9 +34,15 @@ import java.lang.annotation.Target;
  *       }
  * </pre>
  * 
+ * @deprecated This annotation has been split into the more explicit
+ *             {@link RGetter} and {@link RSetter} annotations, which also
+ *             remove the requirement for the accessor methods to be named
+ *             {@code get} and {@code set}. Use {@link RGetter} to mark a field
+ *             getter and {@link RSetter} to mark a field setter instead.
  *
  * @author Rui Gu (https://github.com/jackygurui)
  */
+@Deprecated
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.METHOD})
 public @interface RFieldAccessor {}

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,16 +21,22 @@ import org.redisson.client.codec.StringCodec;
 import org.redisson.client.protocol.RedisCommand;
 import org.redisson.client.protocol.RedisCommands;
 import org.redisson.command.CommandAsyncExecutor;
-import org.redisson.misc.RPromise;
-import org.redisson.misc.RedissonPromise;
+import org.redisson.api.queue.QueueMoveElementsArgs;
+import org.redisson.api.queue.QueueMoveElementsParams;
+import org.redisson.misc.CompletableFutureWrapper;
 
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectOutputStream;
 import java.math.BigInteger;
 import java.security.MessageDigest;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+
+import static org.redisson.client.protocol.RedisCommands.LINDEX;
+import static org.redisson.client.protocol.RedisCommands.LLEN_INT;
 
 /**
  *
@@ -38,7 +44,7 @@ import java.util.function.Supplier;
  *
  * @param <V> value type
  */
-public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriorityQueue<V> {
+public class RedissonPriorityQueue<V> extends BaseRedissonList<V> implements RPriorityQueue<V> {
 
     public static class BinarySearchResult<V> {
 
@@ -79,7 +85,7 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
         this.commandExecutor = commandExecutor;
 
         comparatorHolder = redisson.getBucket(getComparatorKeyName(), StringCodec.INSTANCE);
-        lock = redisson.getLock("redisson_sortedset_lock:{" + getRawName() + "}");
+        lock = redisson.getLock(getLockName());
     }
 
     public RedissonPriorityQueue(Codec codec, CommandAsyncExecutor commandExecutor, String name, RedissonClient redisson) {
@@ -87,7 +93,11 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
         this.commandExecutor = commandExecutor;
 
         comparatorHolder = redisson.getBucket(getComparatorKeyName(), StringCodec.INSTANCE);
-        lock = redisson.getLock("redisson_sortedset_lock:{" + getRawName() + "}");
+        lock = redisson.getLock(getLockName());
+    }
+
+    private String getLockName() {
+        return prefixName("redisson_sortedset_lock", getName());
     }
 
     private void loadComparator() {
@@ -153,7 +163,7 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
         try {
             checkComparator();
     
-            BinarySearchResult<V> res = binarySearch(value);
+            BinarySearchResult<V> res = binarySearch(value, false);
             int index = 0;
             if (res.getIndex() < 0) {
                 index = -(res.getIndex() + 1);
@@ -161,7 +171,7 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
                 index = res.getIndex() + 1;
             }
                 
-            commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_VOID,
+            get(commandExecutor.evalWriteNoRetryAsync(getRawName(), codec, RedisCommands.EVAL_VOID,
                "local len = redis.call('llen', KEYS[1]);"
                 + "if tonumber(ARGV[1]) < len then "
                     + "local pivot = redis.call('lindex', KEYS[1], ARGV[1]);"
@@ -169,12 +179,31 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
                     + "return;"
                 + "end;"
                 + "redis.call('rpush', KEYS[1], ARGV[2]);", 
-                    Arrays.<Object>asList(getRawName()),
-                    index, encode(value));
+                    Arrays.asList(getRawName()),
+                    index, encode(value)));
             return true;
         } finally {
             lock.unlock();
         }
+    }
+
+    V getValue(int index) {
+        return getValue(index, false);
+    }
+
+    V getValue(int index, boolean readOnlyMode) {
+        if (readOnlyMode) return get(commandExecutor.readAsync(getRawName(), codec, LINDEX, getRawName(), index));
+        return get(commandExecutor.writeAsync(getRawName(), codec, LINDEX, getRawName(), index));
+    }
+
+    @Override
+    public int size() {
+        return get(sizeAsync());
+    }
+
+    int size(boolean readOnlyMode) {
+        if (readOnlyMode) return get(commandExecutor.readAsync(getRawName(), codec, LLEN_INT, getRawName()));
+        return get(commandExecutor.writeAsync(getRawName(), codec, LLEN_INT, getRawName()));
     }
 
     private void checkComparator() {
@@ -268,39 +297,43 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
         return wrapLockedAsync(RedisCommands.LPOP, getRawName());
     }
 
-    protected <T> RFuture<V> wrapLockedAsync(RedisCommand<T> command, Object... params) {
-        return wrapLockedAsync(() -> {
-            return commandExecutor.writeAsync(getRawName(), codec, command, params);
+    protected final <T> RFuture<V> wrapLockedAsync(RedisCommand<T> command, Object... params) {
+        CompletionStage<V> f = sizeAsync().thenCompose(r -> {
+            if (r > 0) {
+                return wrapLockedAsync(() -> {
+                    return commandExecutor.writeAsync(getRawName(), codec, command, params);
+                });
+            }
+            return CompletableFuture.completedFuture(null);
         });
-    };
+        return new CompletableFutureWrapper<>(f);
+    }
 
     protected final <T, R> RFuture<R> wrapLockedAsync(Supplier<RFuture<R>> callable) {
-        long threadId = Thread.currentThread().getId();
-        RPromise<R> result = new RedissonPromise<R>();
-        lock.lockAsync(threadId).onComplete((r, exc) -> {
-            if (exc != null) {
-                result.tryFailure(exc);
-                return;
-            }
-
-            RFuture<R> f = callable.get();
-            f.onComplete((value, e) -> {
-                if (e != null) {
-                    result.tryFailure(e);
-                    return;
-                }
-                
-                lock.unlockAsync(threadId).onComplete((res, ex) -> {
-                    if (ex != null) {
-                        result.tryFailure(ex);
-                        return;
-                    }
-                    
-                    result.trySuccess(value);
-                });
-            });
+        long randomId = getServiceManager().getRandom().nextLong();
+        CompletionStage<R> f = lock.lockAsync(randomId).thenCompose(r -> {
+            RFuture<R> callback = callable.get();
+            return callback.handle((value, ex) -> {
+                CompletableFuture<R> result = new CompletableFuture<>();
+                lock.unlockAsync(randomId)
+                        .whenComplete((r2, ex2) -> {
+                            if (ex2 != null) {
+                                if (ex != null) {
+                                    ex2.addSuppressed(ex);
+                                }
+                                result.completeExceptionally(ex2);
+                                return;
+                            }
+                            if (ex != null) {
+                                result.completeExceptionally(ex);
+                                return;
+                            }
+                            result.complete(value);
+                        });
+                return result;
+            }).thenCompose(ff -> ff);
         });
-        return result;
+        return new CompletableFutureWrapper<>(f);
     }
 
     public V getFirst() {
@@ -337,6 +370,10 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
 
     @Override
     public boolean trySetComparator(Comparator<? super V> comparator) {
+        if (comparator.getClass().isSynthetic()) {
+            throw new IllegalArgumentException("Synthetic classes aren't allowed");
+        }
+
         String className = comparator.getClass().getName();
         String comparatorSign = className + ":" + calcClassSign(className);
 
@@ -359,16 +396,21 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
         }
         return value;
     }
+
+    public BinarySearchResult<V> binarySearch(V value) {
+        return binarySearch(value, true);
+    }
     
     // TODO optimize: get three values each time instead of single
-    public BinarySearchResult<V> binarySearch(V value) {
-        int size = size();
+    public BinarySearchResult<V> binarySearch(V value,  boolean readOnlyMode) {
+        int size = size(readOnlyMode);
         int upperIndex = size - 1;
         int lowerIndex = 0;
         while (lowerIndex <= upperIndex) {
             int index = lowerIndex + (upperIndex - lowerIndex) / 2;
 
-            V res = getValue(index);
+            V res = getValue(index, readOnlyMode);
+
             if (res == null) {
                 return new BinarySearchResult<V>();
             }
@@ -414,8 +456,37 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
     }
 
     @Override
+    public List<V> move(QueueMoveElementsArgs args) {
+        return get(moveAsync(args));
+    }
+
+    @Override
+    public RFuture<List<V>> moveAsync(QueueMoveElementsArgs args) {
+        QueueMoveElementsParams pp = (QueueMoveElementsParams) args;
+        List<Object> params = new ArrayList<>();
+        params.add(getRawName());
+        params.add(mapName(pp.getDestName()));
+        params.add("LEFT");
+        params.add("RIGHT");
+        if (pp.getSelector() != null) {
+            params.add(pp.getSelector());
+            params.add(pp.getCount());
+            params.add(pp.getOrdering());
+        }
+        return wrapLockedAsync(() -> {
+            return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.LMOVEM, params.toArray());
+        });
+    }
+
+    @Override
     public RFuture<V> pollLastAndOfferFirstToAsync(String queueName) {
-        return wrapLockedAsync(RedisCommands.RPOPLPUSH, getRawName(), queueName);
+        CompletionStage<V> f = sizeAsync().thenCompose(r -> {
+            if (r > 0) {
+                return wrapLockedAsync(RedisCommands.RPOPLPUSH, getRawName(), queueName);
+            }
+            return CompletableFuture.completedFuture(null);
+        });
+        return new CompletableFutureWrapper<>(f);
     }
 
     @Override
@@ -424,13 +495,18 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
     }
 
     @Override
-    public RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit) {
-        return expireAsync(timeToLive, timeUnit, getRawName(), getComparatorKeyName());
+    public RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit, String param, String... keys) {
+        return super.expireAsync(timeToLive, timeUnit, param, getRawName(), getComparatorKeyName());
     }
 
     @Override
-    public RFuture<Boolean> expireAtAsync(long timestamp) {
-        return expireAtAsync(timestamp, getRawName(), getComparatorKeyName());
+    protected RFuture<Boolean> blessKeysAsync(String subcommand, String... keys) {
+        return super.blessKeysAsync(subcommand, getRawName(), getComparatorKeyName());
+    }
+
+    @Override
+    protected RFuture<Boolean> expireAtAsync(long timestamp, String param, String... keys) {
+        return super.expireAtAsync(timestamp, param, getRawName(), getComparatorKeyName());
     }
 
     @Override
@@ -456,7 +532,7 @@ public class RedissonPriorityQueue<V> extends RedissonList<V> implements RPriori
     @Override
     public RFuture<List<V>> pollAsync(int limit) {
         return wrapLockedAsync(() -> {
-            return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_LIST,
+            return commandExecutor.evalWriteNoRetryAsync(getRawName(), codec, RedisCommands.EVAL_LIST,
                        "local result = {};"
                      + "for i = 1, ARGV[1], 1 do " +
                            "local value = redis.call('lpop', KEYS[1]);" +

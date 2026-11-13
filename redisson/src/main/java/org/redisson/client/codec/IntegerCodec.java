@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,7 @@
  */
 package org.redisson.client.codec;
 
-import java.io.IOException;
-
-import org.redisson.client.handler.State;
 import org.redisson.client.protocol.Decoder;
-
-import io.netty.buffer.ByteBuf;
 
 /**
  * 
@@ -31,12 +26,9 @@ public class IntegerCodec extends StringCodec {
 
     public static final IntegerCodec INSTANCE = new IntegerCodec();
 
-    private final Decoder<Object> decoder = new Decoder<Object>() {
-        @Override
-        public Object decode(ByteBuf buf, State state) throws IOException {
-            String str = (String) IntegerCodec.super.getValueDecoder().decode(buf, state);
-            return Integer.valueOf(str);
-        }
+    private final Decoder<Object> decoder = (buf, state) -> {
+        String str = (String) IntegerCodec.super.getValueDecoder().decode(buf, state);
+        return Integer.valueOf(str);
     };
 
     @Override

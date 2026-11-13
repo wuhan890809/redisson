@@ -1,0 +1,342 @@
+package org.redisson.spring.data.connection;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.data.geo.Circle;
+import org.springframework.data.geo.GeoResults;
+import org.springframework.data.geo.Point;
+import org.springframework.data.redis.connection.RedisGeoCommands;
+import org.springframework.data.redis.connection.RedisStringCommands.SetOption;
+import org.springframework.data.redis.connection.RedisZSetCommands;
+import org.springframework.data.redis.connection.zset.Tuple;
+import org.springframework.data.redis.core.*;
+import org.springframework.data.redis.core.types.Expiration;
+import org.springframework.data.redis.core.types.RedisClientInfo;
+import org.springframework.data.redis.serializer.RedisSerializer;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+public class RedissonConnectionTest extends BaseConnectionTest {
+
+    @Test
+    public void testSetWithExpirationOptionKeepTtl() {
+        byte[] key = "set-keepttl-repro".getBytes();
+        connection.set(key, "value1".getBytes());
+        connection.expire(key, 100);
+
+        Boolean result = connection.set(key, "value2".getBytes(), Expiration.keepTtl(), SetOption.upsert());
+
+        assertThat(result).isTrue();
+        assertThat(connection.get(key)).isEqualTo("value2".getBytes());
+        assertThat(connection.ttl(key)).isGreaterThan(0);
+    }
+
+    @Test
+    public void testSetWithExpirationOptionUnixTimestampSetsCorrectTtl() {
+        // set(key, value, Expiration, SetOption) has no isUnixTimestamp() branch at all,
+        // so Expiration.unixTimestamp(...) falls into the relative-time branch and its
+        // absolute epoch-millis value gets sent as a PX delay instead of a PXAT deadline.
+        // This does not throw (unlike KEEPTTL), so it must be checked by TTL value, not
+        // just absence of exception - a repeat of the exact silent-wrong-TTL failure mode
+        // getEx() had for the same Expiration kind before it was fixed.
+        byte[] key = "set-unixtimestamp-repro".getBytes();
+        connection.set(key, "value1".getBytes());
+
+        long targetEpochMillis = System.currentTimeMillis() + 120_000; // 2 minutes from now
+        connection.set(key, "value2".getBytes(), Expiration.unixTimestamp(targetEpochMillis, TimeUnit.MILLISECONDS), SetOption.upsert());
+
+        long ttlMillis = connection.pTtl(key);
+        assertThat(ttlMillis)
+                .as("TTL should be ~120000ms (2 minutes), not the epoch timestamp misread as a PX delay")
+                .isGreaterThan(0)
+                .isLessThan(150_000);
+    }
+
+    @Test
+    public void testSetWithExpirationOptionUnixTimestampSecondsUnit() {
+        // Same as above but constructed with SECONDS instead of MILLISECONDS, to confirm
+        // Expiration.getExpirationTimeInMilliseconds() normalizes correctly regardless of
+        // the unit the Expiration was originally built with.
+        byte[] key = "set-unixtimestamp-seconds-repro".getBytes();
+        connection.set(key, "value1".getBytes());
+
+        long targetEpochSeconds = (System.currentTimeMillis() / 1000) + 120;
+        connection.set(key, "value2".getBytes(), Expiration.unixTimestamp(targetEpochSeconds, TimeUnit.SECONDS), SetOption.upsert());
+
+        long ttlMillis = connection.pTtl(key);
+        assertThat(ttlMillis)
+                .as("TTL should be ~120000ms (2 minutes) when built from a SECONDS-unit unix timestamp too")
+                .isGreaterThan(0)
+                .isLessThan(150_000);
+    }
+
+    @Test
+    public void testSetExpirationOptionMatrix() {
+        java.util.List<String> failures = new java.util.ArrayList<>();
+        java.util.List<String> passes = new java.util.ArrayList<>();
+
+        Expiration[] expirations = new Expiration[] {
+            Expiration.milliseconds(60000),
+            Expiration.persistent(),
+            Expiration.keepTtl(),
+            Expiration.unixTimestamp(System.currentTimeMillis() + 60000, TimeUnit.MILLISECONDS)
+        };
+        String[] expirationNames = { "relative(60s)", "persistent", "keepTtl", "unixTimestamp" };
+
+        SetOption[] options = { SetOption.upsert(), SetOption.ifAbsent(), SetOption.ifPresent() };
+        String[] optionNames = { "UPSERT", "IF_ABSENT", "IF_PRESENT" };
+
+        for (int e = 0; e < expirations.length; e++) {
+            for (int o = 0; o < options.length; o++) {
+                byte[] key = ("matrix-" + e + "-" + o).getBytes();
+                if (optionNames[o].equals("IF_ABSENT")) {
+                    // NX only applies the write when the key does not already exist -
+                    // seeding it here would make every NX case a guaranteed no-op.
+                    connection.del(key);
+                } else {
+                    connection.set(key, "seed".getBytes());
+                    if (optionNames[o].equals("IF_PRESENT") || expirationNames[e].equals("keepTtl")) {
+                        connection.expire(key, 100);
+                    }
+                }
+                String label = expirationNames[e] + " + " + optionNames[o];
+                try {
+                    connection.set(key, "updated".getBytes(), expirations[e], options[o]);
+
+                    // Absence of an exception is not enough on its own - unixTimestamp
+                    // silently set a ~56-year TTL instead of throwing before this was fixed,
+                    // so the actual TTL has to be checked too, not just "did it not blow up".
+                    if (expirationNames[e].equals("unixTimestamp")) {
+                        long ttl = connection.pTtl(key);
+                        if (ttl <= 0 || ttl > 150_000) {
+                            failures.add(label + " -> wrong TTL: " + ttl + "ms (expected ~60000ms)");
+                            continue;
+                        }
+                    }
+                    passes.add(label);
+                } catch (Exception ex) {
+                    failures.add(label + " -> " + ex.getCause());
+                }
+            }
+        }
+
+        System.out.println("=== set(key, value, Expiration, SetOption) matrix ===");
+        System.out.println("PASS (" + passes.size() + "): " + passes);
+        System.out.println("FAIL (" + failures.size() + "): " + failures);
+
+        assertThat(failures).isEmpty();
+        assertThat(passes).hasSize(12);
+    }
+
+    @Test
+    public void testExecute() {
+        Long s = (Long) connection.execute("ttl", "key".getBytes());
+        assertThat(s).isEqualTo(-2);
+        connection.execute("flushDb");
+    }
+
+    @Test
+    public void testRandomMembers() {
+        RedisTemplate<String, Integer> redisTemplate = new RedisTemplate<>();
+        redisTemplate.setConnectionFactory(new RedissonConnectionFactory(redisson));
+        redisTemplate.afterPropertiesSet();
+
+
+        SetOperations<String, Integer> ops = redisTemplate.opsForSet();
+        ops.add("val", 1, 2, 3, 4);
+        Set<Integer> values = redisTemplate.opsForSet().distinctRandomMembers("val", 1L);
+        assertThat(values).containsAnyOf(1, 2, 3, 4);
+
+        Integer v = redisTemplate.opsForSet().randomMember("val");
+        assertThat(v).isNotNull();
+    }
+
+    @Test
+    public void testRangeByLex() {
+        RedisTemplate<String, String> redisTemplate = new RedisTemplate<>();
+        redisTemplate.setConnectionFactory(new RedissonConnectionFactory(redisson));
+        redisTemplate.afterPropertiesSet();
+
+        RedisZSetCommands.Range range = new RedisZSetCommands.Range();
+        range.lt("c");
+        Set<String> zSetValue = redisTemplate.opsForZSet().rangeByLex("val", range);
+        assertThat(zSetValue).isEmpty();
+    }
+
+    @Test
+    public void testGeo() {
+        RedisTemplate<String, String> redisTemplate = new RedisTemplate<>();
+        redisTemplate.setConnectionFactory(new RedissonConnectionFactory(redisson));
+        redisTemplate.afterPropertiesSet();
+
+        String key = "test_geo_key";
+        Point point = new Point(116.401001, 40.119499);
+        redisTemplate.opsForGeo().add(key, point, "a");
+
+        point = new Point(111.545998, 36.133499);
+        redisTemplate.opsForGeo().add(key, point, "b");
+
+        point = new Point(111.483002, 36.030998);
+        redisTemplate.opsForGeo().add(key, point, "c");
+        Circle within = new Circle(116.401001, 40.119499, 80000);
+        RedisGeoCommands.GeoRadiusCommandArgs args = RedisGeoCommands.GeoRadiusCommandArgs.newGeoRadiusArgs().includeCoordinates();
+        GeoResults<RedisGeoCommands.GeoLocation<String>> res = redisTemplate.opsForGeo().radius(key, within, args);
+        assertThat(res.getContent().get(0).getContent().getName()).isEqualTo("a");
+    }
+
+    @Test
+    public void testZSet() {
+        connection.zAdd(new byte[] {1}, -1, new byte[] {1});
+        connection.zAdd(new byte[] {1}, 2, new byte[] {2});
+        connection.zAdd(new byte[] {1}, 10, new byte[] {3});
+
+        assertThat(connection.zRangeByScore(new byte[] {1}, Double.NEGATIVE_INFINITY, 5))
+                .containsOnly(new byte[] {1}, new byte[] {2});
+    }
+
+    @Test
+    public void testEcho() {
+        assertThat(connection.echo("test".getBytes())).isEqualTo("test".getBytes());
+    }
+
+    @Test
+    public void testSetGet() {
+        connection.set("key".getBytes(), "value".getBytes());
+        assertThat(connection.get("key".getBytes())).isEqualTo("value".getBytes());
+    }
+    
+    @Test
+    public void testSetExpiration() {
+        assertThat(connection.set("key".getBytes(), "value".getBytes(), Expiration.milliseconds(111122), SetOption.SET_IF_ABSENT)).isTrue();
+        assertThat(connection.get("key".getBytes())).isEqualTo("value".getBytes());
+    }
+    
+    @Test
+    public void testHSetGet() {
+        assertThat(connection.hSet("key".getBytes(), "field".getBytes(), "value".getBytes())).isTrue();
+        assertThat(connection.hGet("key".getBytes(), "field".getBytes())).isEqualTo("value".getBytes());
+    }
+
+    @Test
+    public void testZScan() {
+        connection.zAdd("key".getBytes(), 1, "value1".getBytes());
+        connection.zAdd("key".getBytes(), 2, "value2".getBytes());
+
+        Cursor<Tuple> t = connection.zScan("key".getBytes(), ScanOptions.scanOptions().build());
+        assertThat(t.hasNext()).isTrue();
+        assertThat(t.next().getValue()).isEqualTo("value1".getBytes());
+        assertThat(t.hasNext()).isTrue();
+        assertThat(t.next().getValue()).isEqualTo("value2".getBytes());
+    }
+
+    @Test
+    public void testRandFieldWithValues() {
+        connection.hSet("map".getBytes(), "key1".getBytes(), "value1".getBytes());
+        connection.hSet("map".getBytes(), "key2".getBytes(), "value2".getBytes());
+        connection.hSet("map".getBytes(), "key3".getBytes(), "value3".getBytes());
+
+        List<Map.Entry<byte[], byte[]>> s = connection.hRandFieldWithValues("map".getBytes(), 2);
+        assertThat(s).hasSize(2);
+
+        Map.Entry<byte[], byte[]> s2 = connection.hRandFieldWithValues("map".getBytes());
+        assertThat(s2).isNotNull();
+
+        byte[] f = connection.hRandField("map".getBytes());
+        assertThat((Object) f).isIn("key1".getBytes(), "key2".getBytes(), "key3".getBytes());
+    }
+
+    @Test
+    public void testGetClientList() {
+        List<RedisClientInfo> info = connection.getClientList();
+        assertThat(info.size()).isGreaterThan(10);
+    }
+
+    @Test
+    public void testFilterOkResponsesInTransaction() {
+        // Test with filterOkResponses = false (default behavior)
+        RedisTemplate<String, String> redisTemplate = new RedisTemplate<>();
+        RedissonConnectionFactory connectionFactory = new RedissonConnectionFactory(redisson);
+        // connectionFactory.setFilterOkResponses(false);
+        redisTemplate.setConnectionFactory(connectionFactory);
+        redisTemplate.afterPropertiesSet();
+
+        List<Object> results = (List<Object>) redisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+            connection.multi();
+            connection.set("test:key1".getBytes(), "value1".getBytes());
+            connection.set("test:key2".getBytes(), "value2".getBytes());
+            connection.get("test:key1".getBytes());
+            connection.get("test:key2".getBytes());
+            return connection.exec();
+        }, RedisSerializer.string()).get(0);
+
+        // With filterOkResponses=false, all responses including "OK" should be preserved
+        assertThat(results).hasSize(4);
+        assertThat(results.get(0)).isEqualTo(true);
+        assertThat(results.get(1)).isEqualTo(true);
+        assertThat(results.get(2)).isEqualTo("value1");
+        assertThat(results.get(3)).isEqualTo("value2");
+
+        // Test with filterOkResponses = true
+        connectionFactory.setFilterOkResponses(true);
+        redisTemplate.afterPropertiesSet();
+
+        List<Object> filteredResults = (List<Object>) redisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+            connection.multi();
+            connection.set("test:key3".getBytes(), "value3".getBytes());
+            connection.set("test:key4".getBytes(), "value4".getBytes());
+            connection.get("test:key3".getBytes());
+            connection.get("test:key4".getBytes());
+            return connection.exec();
+        }, RedisSerializer.string()).get(0);
+
+        // With filterOkResponses=true, "OK" responses should be filtered out
+        assertThat(filteredResults).hasSize(2);
+        assertThat(filteredResults.get(0)).isEqualTo("value3");
+        assertThat(filteredResults.get(1)).isEqualTo("value4");
+    }
+
+    @Test
+    public void testPTtl() {
+        connection.set("key1".getBytes(), "value1".getBytes());
+        connection.set("key2".getBytes(), "value2".getBytes());
+        connection.expire("key1".getBytes(), 10);
+
+        assertThat(connection.pTtl("key1".getBytes(), TimeUnit.MILLISECONDS)).isGreaterThan(0L).isLessThanOrEqualTo(10000L);
+        assertThat(connection.pTtl("key1".getBytes(), TimeUnit.SECONDS)).isGreaterThan(0L).isLessThanOrEqualTo(10L);
+        assertThat(connection.pTtl("key1".getBytes(), TimeUnit.MINUTES)).isEqualTo(0L);
+        assertThat(connection.pTtl("key1".getBytes())).isGreaterThan(0L).isLessThanOrEqualTo(10000L);
+
+        assertThat(connection.pTtl("key2".getBytes(), TimeUnit.SECONDS)).isEqualTo(-1L);
+        assertThat(connection.pTtl("key2".getBytes(), TimeUnit.MINUTES)).isEqualTo(-1L);
+        assertThat(connection.pTtl("key2".getBytes())).isEqualTo(-1L);
+
+        assertThat(connection.pTtl("key3".getBytes(), TimeUnit.SECONDS)).isEqualTo(-2L);
+        assertThat(connection.pTtl("key3".getBytes(), TimeUnit.MINUTES)).isEqualTo(-2L);
+        assertThat(connection.pTtl("key3".getBytes())).isEqualTo(-2L);
+    }
+
+    @Test
+    public void testTtl() {
+        connection.set("key1".getBytes(), "value1".getBytes());
+        connection.set("key2".getBytes(), "value2".getBytes());
+        connection.expire("key1".getBytes(), 10);
+
+        assertThat(connection.ttl("key1".getBytes(), TimeUnit.MILLISECONDS)).isGreaterThan(0L).isLessThanOrEqualTo(10000L);
+        assertThat(connection.ttl("key1".getBytes(), TimeUnit.SECONDS)).isGreaterThan(0L).isLessThanOrEqualTo(10L);
+        assertThat(connection.ttl("key1".getBytes(), TimeUnit.MINUTES)).isEqualTo(0L);
+        assertThat(connection.ttl("key1".getBytes())).isGreaterThan(0L).isLessThanOrEqualTo(10000L);
+
+        assertThat(connection.ttl("key2".getBytes(), TimeUnit.SECONDS)).isEqualTo(-1L);
+        assertThat(connection.ttl("key2".getBytes(), TimeUnit.MINUTES)).isEqualTo(-1L);
+        assertThat(connection.ttl("key2".getBytes())).isEqualTo(-1L);
+
+        assertThat(connection.ttl("key3".getBytes(), TimeUnit.SECONDS)).isEqualTo(-2L);
+        assertThat(connection.ttl("key3".getBytes(), TimeUnit.MINUTES)).isEqualTo(-2L);
+        assertThat(connection.ttl("key3".getBytes())).isEqualTo(-2L);
+    }
+
+}

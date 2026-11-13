@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import org.redisson.api.RMapCache;
 import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
 
-import java.io.IOException;
 import java.io.InputStream;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReadWriteLock;
@@ -52,7 +51,7 @@ public class RedissonCache implements Cache {
     @Override
     public void putObject(Object o, Object o1) {
         check();
-        mapCache.put(o, o1, timeToLive, TimeUnit.MILLISECONDS, maxIdleTime, TimeUnit.MILLISECONDS);
+        mapCache.fastPut(o, o1, timeToLive, TimeUnit.MILLISECONDS, maxIdleTime, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -102,9 +101,9 @@ public class RedissonCache implements Cache {
     public void setRedissonConfig(String config) {
         Config cfg;
         try {
-            InputStream is = getClass().getResourceAsStream(config);
+            InputStream is = getClass().getClassLoader().getResourceAsStream(config);
             cfg = Config.fromYAML(is);
-        } catch (IOException e) {
+        } catch (Exception e) {
             throw new IllegalArgumentException("Can't parse config", e);
         }
 

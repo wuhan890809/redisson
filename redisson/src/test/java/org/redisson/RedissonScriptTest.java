@@ -1,31 +1,78 @@
 package org.redisson;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.redisson.api.*;
+import org.redisson.api.RScript.Mode;
+import org.redisson.client.RedisNoScriptException;
+import org.redisson.client.codec.StringCodec;
+import org.redisson.config.CommandMapper;
+import org.redisson.config.Config;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ExecutionException;
 
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Test;
-import org.redisson.api.RFuture;
-import org.redisson.api.RLexSortedSet;
-import org.redisson.api.RScript;
-import org.redisson.api.RScript.Mode;
-import org.redisson.client.RedisException;
-import org.redisson.client.codec.StringCodec;
+import static org.assertj.core.api.Assertions.assertThat;
 
-public class RedissonScriptTest extends BaseTest {
+public class RedissonScriptTest extends RedisDockerTest {
+
+    @Test
+    public void testCommandMapping() {
+        String script = "local value = redis.call('cmd1', KEYS[1], ARGV[1]); "
+                + "if value ~= false then "
+                    + "redis.call('cmd2', KEYS[1], ARGV[1], ARGV[2]); "
+                    + "redis.call('cmd2', KEYS[1], ARGV[1], ARGV[2]); "
+                    + "return value; "
+                + "end; "
+                + "return nil; ";
+
+        Config cfg = createConfig();
+        cfg.useSingleServer().setCommandMapper(name -> {
+            if (name.equalsIgnoreCase("cmd1")) {
+                return "hget";
+            }
+            if (name.equalsIgnoreCase("cmd2")) {
+                return "hset";
+            }
+            return name;
+        });
+
+        RedissonClient r = Redisson.create(cfg);
+        RMap<Object, Object> m = r.getMap("test");
+        m.fastPut("key1", "value");
+
+        String res = r.getScript().eval(Mode.READ_WRITE,
+                script,
+                RScript.ReturnType.VALUE, Arrays.asList("test"), "key1", "value3");
+        assertThat(res).isEqualTo("value");
+
+        assertThat(m.get("key1")).isEqualTo("value3");
+    }
+
+
+    @Test
+    public void testCommandMapping2() {
+        Config cfg = createConfig();
+        cfg.useSingleServer().setCommandMapper(name -> name.equalsIgnoreCase("ttl") ? "pttl" : name);
+
+        RedissonClient r = Redisson.create(cfg);
+        String script = "redis.call('set','test','value','ex',60);redis.call('ttl','test');return redis.call('ttl','test');";
+        RScript rScript = r.getScript();
+        int eval = rScript.eval(Mode.READ_WRITE, script, RScript.ReturnType.LONG);
+        assert eval == 60000;
+    }
 
     @Test
     public void testMulti() {
         RLexSortedSet idx2 = redisson.getLexSortedSet("ABCD17436");
         
-        Long l = new Long("1506524856000");
+        long l = Long.parseLong("1506524856000");
         for (int i = 0; i < 100; i++) {
             String s = "DENY" + "\t" + "TESTREDISSON" + "\t"
-                    + Long.valueOf(l) + "\t" + "helloworld_hongqin";
+                    + l + "\t" + "helloworld_hongqin";
             idx2.add(s);
             l = l + 1;
         }
@@ -39,28 +86,45 @@ public class RedissonScriptTest extends BaseTest {
      
          List<List<Object>> objs = redisson.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_ONLY,
                 luaScript1,
-                RScript.ReturnType.MULTI, Collections.emptyList());            
+                RScript.ReturnType.LIST, Collections.emptyList());
         
         assertThat(objs).hasSize(3);
         assertThat(objs.get(0)).hasSize(5);
         assertThat(objs.get(1)).hasSize(15);
         assertThat(objs.get(2)).hasSize(25);
     }
-    
+
+    @Test
+    public void testString() {
+        RScript script = redisson.getScript(StringCodec.INSTANCE);
+        String res = script.eval(RScript.Mode.READ_ONLY, "return 'hello'", RScript.ReturnType.STRING);
+        assertThat(res).isEqualTo("hello");
+    }
+
     @Test
     public void testEval() {
         RScript script = redisson.getScript(StringCodec.INSTANCE);
-        List<Object> res = script.eval(RScript.Mode.READ_ONLY, "return {'1','2','3.3333','foo',nil,'bar'}", RScript.ReturnType.MULTI, Collections.emptyList());
+        List<Object> res = script.eval(RScript.Mode.READ_ONLY, "return {'1','2','3.3333','foo',nil,'bar'}", RScript.ReturnType.LIST, Collections.emptyList());
         assertThat(res).containsExactly("1", "2", "3.3333", "foo");
     }
 
     @Test
     public void testEvalAsync() {
         RScript script = redisson.getScript(StringCodec.INSTANCE);
-        RFuture<List<Object>> res = script.evalAsync(RScript.Mode.READ_ONLY, "return {'1','2','3.3333','foo',nil,'bar'}", RScript.ReturnType.MULTI, Collections.emptyList());
-        assertThat(res.awaitUninterruptibly().getNow()).containsExactly("1", "2", "3.3333", "foo");
+        RFuture<List<Object>> res = script.evalAsync(RScript.Mode.READ_ONLY, "return {'1','2','3.3333','foo',nil,'bar'}", RScript.ReturnType.LIST, Collections.emptyList());
+        assertThat(res.toCompletableFuture().join()).containsExactly("1", "2", "3.3333", "foo");
     }
-    
+
+    @Test
+    public void testEvalResultMapping() {
+        testInCluster(redissonClient -> {
+            RScript script = redissonClient.getScript(StringCodec.INSTANCE);
+            Long res = script.eval(RScript.Mode.READ_ONLY, "return 1;", RScript.ReturnType.LONG,
+                    integers -> integers.stream().mapToLong(r -> r).sum());
+            assertThat(res).isEqualTo(3);
+        });
+    }
+
     @Test
     public void testScriptEncoding() {
         RScript script = redisson.getScript();
@@ -97,10 +161,21 @@ public class RedissonScriptTest extends BaseTest {
         Assertions.assertEquals("bar", r1);
         redisson.getScript().scriptFlush();
 
-        try {
+        Assertions.assertThrows(RedisNoScriptException.class, () -> {
             redisson.getScript().evalSha(Mode.READ_ONLY, "282297a0228f48cd3fc6a55de6316f31422f5d17", RScript.ReturnType.VALUE, Collections.emptyList());
-        } catch (Exception e) {
-            Assertions.assertEquals(RedisException.class, e.getClass());
+        });
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = BatchOptions.ExecutionMode.class, names = {"IN_MEMORY", "IN_MEMORY_ATOMIC"})
+    public void testBatchEvalAfterScriptFlush(BatchOptions.ExecutionMode executionMode) {
+        for (int i = 0; i < 2; i++) {
+            RBatch batch = redisson.createBatch(BatchOptions.defaults().executionMode(executionMode));
+            RFuture<String> result = batch.getScript(StringCodec.INSTANCE).evalAsync(Mode.READ_WRITE, "return 'flushed'", RScript.ReturnType.VALUE);
+            batch.execute();
+            assertThat(result.toCompletableFuture().join()).isEqualTo("flushed");
+
+            redisson.getScript().scriptFlush();
         }
     }
 
@@ -117,7 +192,7 @@ public class RedissonScriptTest extends BaseTest {
     public void testScriptLoadAsync() {
         redisson.getBucket("foo").set("bar");
         RFuture<String> r = redisson.getScript().scriptLoadAsync("return redis.call('get', 'foo')");
-        Assertions.assertEquals("282297a0228f48cd3fc6a55de6316f31422f5d17", r.awaitUninterruptibly().getNow());
+        Assertions.assertEquals("282297a0228f48cd3fc6a55de6316f31422f5d17", r.toCompletableFuture().join());
         String r1 = redisson.getScript().evalSha(Mode.READ_ONLY, "282297a0228f48cd3fc6a55de6316f31422f5d17", RScript.ReturnType.VALUE, Collections.emptyList());
         Assertions.assertEquals("bar", r1);
     }
@@ -143,7 +218,7 @@ public class RedissonScriptTest extends BaseTest {
         String r = redisson.getScript().eval(Mode.READ_ONLY, "return redis.call('get', 'foo')", RScript.ReturnType.VALUE);
         Assertions.assertEquals("bar", r);
         RFuture<Object> r1 = redisson.getScript().evalShaAsync(Mode.READ_ONLY, "282297a0228f48cd3fc6a55de6316f31422f5d17", RScript.ReturnType.VALUE, Collections.emptyList());
-        Assertions.assertEquals("bar", r1.awaitUninterruptibly().getNow());
+        Assertions.assertEquals("bar", r1.toCompletableFuture().join());
     }
 
 

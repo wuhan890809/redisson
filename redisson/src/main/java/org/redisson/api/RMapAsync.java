@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -164,8 +164,18 @@ public interface RMapAsync<K, V> extends RExpirableAsync {
     /**
      * Adds the given <code>delta</code> to the current value
      * by mapped <code>key</code>.
-     *
-     * Works only for <b>numeric</b> values!
+     * <p>
+     * Works only with codecs below
+     * <p>
+     * {@link org.redisson.codec.JsonJacksonCodec},
+     * <p>
+     * {@link org.redisson.client.codec.StringCodec},
+     * <p>
+     * {@link org.redisson.client.codec.IntegerCodec},
+     * <p>
+     * {@link org.redisson.client.codec.DoubleCodec}
+     * <p>
+     * {@link org.redisson.client.codec.LongCodec}
      *
      * @param key - map key
      * @param delta the value to add
@@ -199,6 +209,171 @@ public interface RMapAsync<K, V> extends RExpirableAsync {
      * @return size
      */
     RFuture<Integer> sizeAsync();
+
+    /**
+     * Returns values of this map using iterable.
+     * Values are loaded in batch. Batch size is <code>10</code>.
+     *
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<V> valuesAsync();
+
+    /**
+     * Returns values of this map using iterable.
+     * Values are loaded in batch. Batch size is <code>10</code>.
+     * If <code>keyPattern</code> is not null then only values mapped by matched keys of this pattern are loaded.
+     * <p>
+     * Use <code>org.redisson.client.codec.StringCodec</code> for Map keys.
+     * <p>
+     * Usage example:
+     * <pre>
+     *     Codec valueCodec = ...
+     *     RMap<String, MyObject> map = redissonClient.getMap("simpleMap", new CompositeCodec(StringCodec.INSTANCE, valueCodec, valueCodec));
+     *
+     *     // or
+     *
+     *     RMap<String, String> map = redissonClient.getMap("simpleMap", StringCodec.INSTANCE);
+     * </pre>
+     * <pre>
+     *  Supported glob-style patterns:
+     *    h?llo subscribes to hello, hallo and hxllo
+     *    h*llo subscribes to hllo and heeeello
+     *    h[ae]llo subscribes to hello and hallo, but not hillo
+     * </pre>
+     *
+     * @param keyPattern - key pattern
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<V> valuesAsync(String keyPattern);
+
+    /**
+     * Returns values of this map using iterable.
+     * Values are loaded in batch. Batch size is <code>10</code>.
+     * If <code>keyPattern</code> is not null then only values mapped by matched keys of this pattern are loaded.
+     * <p>
+     * Use <code>org.redisson.client.codec.StringCodec</code> for Map keys.
+     * <p>
+     * Usage example:
+     * <pre>
+     *     Codec valueCodec = ...
+     *     RMap<String, MyObject> map = redissonClient.getMap("simpleMap", new CompositeCodec(StringCodec.INSTANCE, valueCodec, valueCodec));
+     *
+     *     // or
+     *
+     *     RMap<String, String> map = redissonClient.getMap("simpleMap", StringCodec.INSTANCE);
+     * </pre>
+     * <pre>
+     *  Supported glob-style patterns:
+     *    h?llo subscribes to hello, hallo and hxllo
+     *    h*llo subscribes to hllo and heeeello
+     *    h[ae]llo subscribes to hello and hallo, but not hillo
+     * </pre>
+     *
+     * @param keyPattern - key pattern
+     * @param count - size of values batch
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<V> valuesAsync(String keyPattern, int count);
+
+    /**
+     * Returns values of this map using iterable.
+     * Values are loaded in batch. Batch size is defined by <code>count</code> param.
+     *
+     * @param count - size of values batch
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<V> valuesAsync(int count);
+
+    /**
+     * Returns keys of this map using iterable.
+     * Keys are loaded in batch. Batch size is <code>10</code>.
+     *
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<K> keysAsync();
+
+    /**
+     * Returns keys of this map using iterable.
+     * Keys are loaded in batch. Batch size is defined by <code>count</code> param.
+     *
+     * @param count - size of keys batch
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<K> keysAsync(int count);
+
+    /**
+     * Returns map entries using iterable.
+     * Map entries are loaded in batch. Batch size is <code>10</code>.
+     *
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<java.util.Map.Entry<K, V>> entrySetAsync();
+
+    /**
+     * Returns map entries using iterable.
+     * Map entries are loaded in batch. Batch size is <code>10</code>.
+     * If <code>keyPattern</code> is not null then only entries mapped by matched keys of this pattern are loaded.
+     * <p>
+     * Use <code>org.redisson.client.codec.StringCodec</code> for Map keys.
+     * <p>
+     * Usage example:
+     * <pre>
+     *     Codec valueCodec = ...
+     *     RMap<String, MyObject> map = redissonClient.getMap("simpleMap", new CompositeCodec(StringCodec.INSTANCE, valueCodec, valueCodec));
+     *
+     *     // or
+     *
+     *     RMap<String, String> map = redissonClient.getMap("simpleMap", StringCodec.INSTANCE);
+     * </pre>
+     * <pre>
+     *  Supported glob-style patterns:
+     *    h?llo subscribes to hello, hallo and hxllo
+     *    h*llo subscribes to hllo and heeeello
+     *    h[ae]llo subscribes to hello and hallo, but not hillo
+     * </pre>
+     *
+     * @param keyPattern key pattern
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<java.util.Map.Entry<K, V>> entrySetAsync(String keyPattern);
+
+    /**
+     * Returns map entries using iterable.
+     * Map entries are loaded in batch. Batch size is defined by <code>count</code> param.
+     * If <code>keyPattern</code> is not null then only entries mapped by matched keys of this pattern are loaded.
+     * <p>
+     * Use <code>org.redisson.client.codec.StringCodec</code> for Map keys.
+     * <p>
+     * Usage example:
+     * <pre>
+     *     Codec valueCodec = ...
+     *     RMap<String, MyObject> map = redissonClient.getMap("simpleMap", new CompositeCodec(StringCodec.INSTANCE, valueCodec, valueCodec));
+     *
+     *     // or
+     *
+     *     RMap<String, String> map = redissonClient.getMap("simpleMap", StringCodec.INSTANCE);
+     * </pre>
+     * <pre>
+     *  Supported glob-style patterns:
+     *    h?llo subscribes to hello, hallo and hxllo
+     *    h*llo subscribes to hllo and heeeello
+     *    h[ae]llo subscribes to hello and hallo, but not hillo
+     * </pre>
+     *
+     * @param keyPattern key pattern
+     * @param count size of entries batch
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<java.util.Map.Entry<K, V>> entrySetAsync(String keyPattern, int count);
+
+    /**
+     * Returns map entries using iterable.
+     * Map entries are loaded in batch. Batch size is defined by <code>count</code> param.
+     *
+     * @param count - size of entries batch
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<java.util.Map.Entry<K, V>> entrySetAsync(int count);
 
     /**
      * Removes map entries mapped by specified <code>keys</code>.
@@ -295,6 +470,14 @@ public interface RMapAsync<K, V> extends RExpirableAsync {
     RFuture<Set<K>> readAllKeySetAsync();
 
     /**
+     * Read all keys mapped by matched keys of this pattern at once
+     *
+     * @param keyPattern - key Pattern
+     * @return keys
+     */
+    RFuture<Set<K>> readAllKeySetAsync(String keyPattern);
+
+    /**
      * Read all values at once
      *
      * @return values
@@ -302,11 +485,28 @@ public interface RMapAsync<K, V> extends RExpirableAsync {
     RFuture<Collection<V>> readAllValuesAsync();
 
     /**
+     * Read all values mapped by matched keys of this pattern at once
+     *
+     * @param keyPattern - key Pattern
+     * @return values
+     */
+    RFuture<Collection<V>> readAllValuesAsync(String keyPattern);
+
+    /**
      * Read all map entries at once
      *
      * @return entries
      */
     RFuture<Set<Entry<K, V>>> readAllEntrySetAsync();
+
+
+    /**
+     * Read all entries mapped by matched keys of this pattern at once
+     *
+     * @param keyPattern - key Pattern
+     * @return entries
+     */
+    RFuture<Set<Entry<K, V>>> readAllEntrySetAsync(String keyPattern);
 
     /**
      * Read all map as local instance at once
@@ -410,5 +610,26 @@ public interface RMapAsync<K, V> extends RExpirableAsync {
      *         Previous value if key already exists in the hash and new value has been stored.
      */
     RFuture<V> putIfExistsAsync(K key, V value);
+
+    /**
+     * Clears map without removing options data used during map creation.
+     *
+     * @return <code>true</code> if map was cleared <code>false</code> if not
+     */
+    RFuture<Boolean> clearAsync();
+
+    /**
+     * Adds object event listener
+     *
+     * @see org.redisson.api.listener.TrackingListener
+     * @see org.redisson.api.listener.MapPutListener
+     * @see org.redisson.api.listener.MapRemoveListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
+     *
+     * @param listener - object event listener
+     * @return listener id
+     */
+    RFuture<Integer> addListenerAsync(ObjectListener listener);
 
 }

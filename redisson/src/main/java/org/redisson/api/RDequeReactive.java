@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,6 +43,22 @@ public interface RDequeReactive<V> extends RQueueReactive<V> {
      * @return length of the list
      */
     Mono<Integer> addLastIfExists(V... elements);
+
+    /**
+     * Adds elements at the head of deque.
+     *
+     * @param elements - elements to add
+     * @return length of the deque
+     */
+    Mono<Integer> addFirst(V... elements);
+
+    /**
+     * Adds elements at the tail of deque.
+     *
+     * @param elements - elements to add
+     * @return length of the deque
+     */
+    Mono<Integer> addLast(V... elements);
 
     Flux<V> descendingIterator();
 

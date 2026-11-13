@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@ package org.redisson.api;
 
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Single;
+import org.redisson.api.atomic.CompareAndDeleteArgs;
+import org.redisson.api.atomic.LongIncrementArgs;
 
 /**
  * RxJava2 interface for AtomicLong object
@@ -25,6 +27,15 @@ import io.reactivex.rxjava3.core.Single;
  *
  */
 public interface RAtomicLongRx extends RExpirableRx {
+
+    /**
+     * Atomically deletes the value if it satisfies the condition
+     * defined by the specified arguments.
+     *
+     * @param args compare and delete arguments
+     * @return {@code true} if deleted, {@code false} otherwise
+     */
+    Single<Boolean> compareAndDelete(CompareAndDeleteArgs args);
 
     /**
      * Atomically sets the value to the given updated value
@@ -90,6 +101,14 @@ public interface RAtomicLongRx extends RExpirableRx {
     Single<Long> incrementAndGet();
 
     /**
+     * Atomically increments the current value according to the specified arguments.
+     *
+     * @param args increment arguments
+     * @return the updated value
+     */
+    Single<Long> incrementAndGet(LongIncrementArgs args);
+
+    /**
      * Atomically increments the current value by one.
      *
      * @return the old value
@@ -110,5 +129,25 @@ public interface RAtomicLongRx extends RExpirableRx {
      * @return void
      */
     Completable set(long newValue);
+    
+    /**
+     * Atomically sets the given value if current value is less than
+     * the special value
+     *
+     * @param less  compare value
+     * @param value newValue
+     * @return true when the value update is successful
+     */
+    Single<Boolean> setIfLess(long less, long value);
+    
+    /**
+     * Atomically sets the given value if current value is greater than
+     * the special value
+     *
+     * @param greater  compare value
+     * @param value newValue
+     * @return true when the value update is successful
+     */
+    Single<Boolean> setIfGreater(long greater, long value);
 
 }

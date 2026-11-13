@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,13 +15,16 @@
  */
 package org.redisson.connection.pool;
 
-import org.redisson.api.RFuture;
 import org.redisson.client.RedisConnection;
 import org.redisson.client.protocol.RedisCommand;
 import org.redisson.config.MasterSlaveServersConfig;
+import org.redisson.config.ReadMode;
 import org.redisson.connection.ClientConnectionsEntry;
 import org.redisson.connection.ConnectionManager;
+import org.redisson.connection.ConnectionsHolder;
 import org.redisson.connection.MasterSlaveEntry;
+
+import java.util.concurrent.CompletableFuture;
 
 
 /**
@@ -31,23 +34,23 @@ import org.redisson.connection.MasterSlaveEntry;
  *
  */
 public class MasterConnectionPool extends ConnectionPool<RedisConnection> {
+
     public MasterConnectionPool(MasterSlaveServersConfig config,
             ConnectionManager connectionManager, MasterSlaveEntry masterSlaveEntry) {
         super(config, connectionManager, masterSlaveEntry);
     }
 
     @Override
-    public RFuture<RedisConnection> get(RedisCommand<?> command) {
-        return acquireConnection(command, entries.peek());
-    }
-    
-    public void remove(ClientConnectionsEntry entry) {
-        entries.remove(entry);
+    protected ConnectionsHolder<RedisConnection> getConnectionHolder(ClientConnectionsEntry entry, boolean trackChanges) {
+        if (trackChanges) {
+            return entry.getTrackedConnectionsHolder();
+        }
+        return entry.getConnectionsHolder();
     }
 
     @Override
-    protected int getMinimumIdleSize(ClientConnectionsEntry entry) {
-        return config.getMasterConnectionMinimumIdleSize();
+    public CompletableFuture<RedisConnection> get(RedisCommand<?> command, boolean trackChanges, ReadMode readMode) {
+        return acquireConnection(command, masterSlaveEntry.getEntry(), trackChanges);
     }
 
 }

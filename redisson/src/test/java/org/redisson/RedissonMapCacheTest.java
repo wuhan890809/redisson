@@ -1,44 +1,131 @@
 package org.redisson;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
+import org.awaitility.Awaitility;
+import org.joor.Reflect;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.redisson.api.*;
+import org.redisson.api.MapOptions.WriteMode;
+import org.redisson.api.map.event.*;
+import org.redisson.client.RedisClient;
+import org.redisson.client.RedisClientConfig;
+import org.redisson.client.RedisConnection;
+import org.redisson.client.codec.*;
+import org.redisson.client.protocol.RedisCommands;
+import org.redisson.codec.CompositeCodec;
+import org.redisson.config.Config;
+import org.redisson.config.NameMapper;
+import org.redisson.eviction.EvictionScheduler;
 
 import java.time.Duration;
-import java.util.AbstractMap;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.Map.Entry;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
-import org.awaitility.Awaitility;
-import org.joor.Reflect;
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Assumptions;
-import org.junit.jupiter.api.Test;
-import org.redisson.api.*;
-import org.redisson.api.MapOptions.WriteMode;
-import org.redisson.api.map.event.EntryCreatedListener;
-import org.redisson.api.map.event.EntryEvent;
-import org.redisson.api.map.event.EntryExpiredListener;
-import org.redisson.api.map.event.EntryRemovedListener;
-import org.redisson.api.map.event.EntryUpdatedListener;
-import org.redisson.client.codec.Codec;
-import org.redisson.client.codec.DoubleCodec;
-import org.redisson.client.codec.IntegerCodec;
-import org.redisson.client.codec.LongCodec;
-import org.redisson.client.codec.StringCodec;
-import org.redisson.codec.CompositeCodec;
-import org.redisson.config.Config;
-import org.redisson.eviction.EvictionScheduler;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 public class RedissonMapCacheTest extends BaseMapTest {
+
+    public static class SimpleEntryCreatedListener implements EntryCreatedListener {
+
+        private Map<Object, Object> map = new HashMap<>();
+
+        @Override
+        public void onCreated(EntryEvent event) {
+            map.put(event.getKey(), event.getValue());
+        }
+
+        public Map<Object, Object> getCreatedEntries() {
+            return new HashMap<>(map);
+        }
+    }
+
+    @Test
+    public void testExpireEntry() {
+        RMapCache<String, String> testMap = redisson.getMapCache("map");
+        testMap.put("key", "value");
+        testMap.expireEntry("key", Duration.ofMillis(0), Duration.ofMillis(20000));
+        assertThat(testMap.remainTimeToLive("key")).isBetween(19800L, 20000L);
+    }
+
+    @Test
+    public void testExpireEntryIfNotSet() {
+        RMapCache<String, String> testMap = redisson.getMapCache("map");
+        testMap.put("key", "value");
+        testMap.expireEntryIfNotSet("key", Duration.ofMillis(0), Duration.ofMillis(20000));
+        assertThat(testMap.remainTimeToLive("key")).isBetween(19800L, 20000L);
+    }
+
+    @Test
+    public void testExpireEntries() {
+        RMapCache<String, String> testMap = redisson.getMapCache("map");
+        testMap.put("key1", "value");
+        testMap.put("key2", "value");
+        testMap.expireEntries(new HashSet<>(Arrays.asList("key1", "key2")), Duration.ofMillis(0), Duration.ofMillis(20000));
+        assertThat(testMap.remainTimeToLive("key1")).isBetween(19800L, 20000L);
+    }
+
+    @Test
+    public void testExpireEntriesIfNotSet() {
+        RMapCache<String, String> testMap = redisson.getMapCache("map");
+        testMap.put("key1", "value");
+        testMap.put("key2", "value");
+        testMap.expireEntriesIfNotSet(new HashSet<>(Arrays.asList("key1", "key2")), Duration.ofMillis(0), Duration.ofMillis(20000));
+        assertThat(testMap.remainTimeToLive("key1")).isBetween(19800L, 20000L);
+    }
+
+    @Test
+    public void testRemoveEmptyEvictionTask() throws InterruptedException {
+        Config config = createConfig();
+        config.setMaxCleanUpDelay(2);
+        config.setMinCleanUpDelay(1);
+        RedissonClient redisson = Redisson.create(config);
+
+        assertThat(redisson.getKeys().count()).isZero();
+        RMapCache<Integer, Integer> map = redisson.getMapCache("simple", MapCacheOptions.<Integer, Integer>defaults().removeEmptyEvictionTask());
+        map.fastPut(1, 1, 1, TimeUnit.SECONDS);
+
+        EvictionScheduler evictionScheduler = ((Redisson) redisson).getEvictionScheduler();
+        Map<?, ?> tasks = Reflect.on(evictionScheduler).get("tasks");
+        assertThat(tasks.isEmpty()).isFalse();
+
+        Thread.sleep(6000);
+
+        assertThat(tasks.isEmpty()).isTrue();
+
+        redisson.shutdown();
+    }
+
+    @Test
+    public void testFastPutExpiration() throws Exception {
+        RMapCache<String, Object> mapCache = redisson.getMapCache("testFastPutExpiration");
+        mapCache.fastPut("k1", "v1", 1, TimeUnit.SECONDS);
+        Thread.sleep(1000);
+        mapCache.fastPut("k1", "v2");
+        assertThat(mapCache.get("k1")).isEqualTo("v2");
+    }
+
+    @Test
+    public void testGetAllWithTTLOnly() throws InterruptedException {
+        RMapCache<Integer, Integer> cache = redisson.getMapCache("testGetAllWithTTLOnly");
+        cache.put(1, 2, 3, TimeUnit.SECONDS);
+        cache.put(3, 4, 1, TimeUnit.SECONDS);
+        cache.put(5, 6, 1, TimeUnit.SECONDS);
+
+        Map<Integer, Integer> map = cache.getAllWithTTLOnly(new HashSet<>(Arrays.asList(1, 3, 5)));
+        assertThat(map).containsOnlyKeys(1, 3, 5);
+        assertThat(map).containsValues(2, 4, 6);
+
+        Thread.sleep(1500);
+
+        map = cache.getAllWithTTLOnly(new HashSet<>(Arrays.asList(1, 3, 5)));
+        assertThat(map).containsOnlyKeys(1);
+        assertThat(map).containsValues(2);
+    }
 
     @Test
     public void testGetWithTTLOnly() throws InterruptedException {
@@ -48,6 +135,57 @@ public class RedissonMapCacheTest extends BaseMapTest {
         assertThat(cache.getWithTTLOnly(1)).isEqualTo(2);
         Thread.sleep(2000);
         assertThat(cache.getWithTTLOnly(1)).isNull();
+    }
+
+    @Test
+    public void testEntryEntryIfNotSet() throws InterruptedException {
+        RMapCache<Integer, Integer> cache = redisson.getMapCache("testUpdateEntryExpiration");
+        cache.put(1, 10);
+        cache.put(2, 20);
+        cache.put(3, 30, 1, TimeUnit.SECONDS);
+
+        assertThat(cache.expireEntryIfNotSet(2, Duration.ofSeconds(2), null)).isTrue();
+        assertThat(cache.expireEntryIfNotSet(3, Duration.ofSeconds(4), null)).isFalse();
+        long ttl2 = cache.remainTimeToLive(2);
+        assertThat(ttl2).isBetween(1900L, 2000L);
+        Thread.sleep(1200);
+        assertThat(cache.containsKey(2)).isTrue();
+        assertThat(cache.containsKey(3)).isFalse();
+        Thread.sleep(1300);
+        assertThat(cache.containsKey(2)).isFalse();
+    }
+
+    @Test
+    public void testEntryEntriesIfNotSet() throws InterruptedException {
+        RMapCache<Integer, Integer> cache = redisson.getMapCache("testUpdateEntryExpiration");
+        cache.put(1, 10);
+        cache.put(2, 20);
+        cache.put(3, 30, 1, TimeUnit.SECONDS);
+
+        assertThat(cache.expireEntriesIfNotSet(new HashSet<>(Arrays.asList(2, 3)), Duration.ofSeconds(2), null)).isEqualTo(1);
+        long ttl2 = cache.remainTimeToLive(2);
+        assertThat(ttl2).isBetween(1900L, 2000L);
+        Thread.sleep(2200);
+        assertThat(cache.expireEntriesIfNotSet(new HashSet<>(Arrays.asList(2, 3)), Duration.ofSeconds(2), null)).isZero();
+        assertThat(cache.containsKey(2)).isFalse();
+        assertThat(cache.containsKey(3)).isFalse();
+    }
+
+    @Test
+    public void testEntryEntries() throws InterruptedException {
+        RMapCache<Integer, Integer> cache = redisson.getMapCache("testUpdateEntryExpiration");
+        cache.put(1, 10, 3, TimeUnit.SECONDS);
+        cache.put(2, 20, 3, TimeUnit.SECONDS);
+        cache.put(3, 30, 3, TimeUnit.SECONDS);
+
+        Thread.sleep(2000);
+        long ttl = cache.remainTimeToLive(1);
+        assertThat(ttl).isBetween(900L, 1000L);
+        assertThat(cache.expireEntries(new HashSet<>(Arrays.asList(2, 3)), Duration.ofSeconds(2), null)).isEqualTo(2);
+        long ttl2 = cache.remainTimeToLive(2);
+        assertThat(ttl2).isBetween(1900L, 2000L);
+        Thread.sleep(2000);
+        assertThat(cache.expireEntries(new HashSet<>(Arrays.asList(2, 3)), Duration.ofSeconds(2), null)).isZero();
     }
 
     @Test
@@ -69,12 +207,7 @@ public class RedissonMapCacheTest extends BaseMapTest {
         RMapCache<Long, String> rMapCache = redisson.getMapCache("test");
         rMapCache.trySetMaxSize(5);
         AtomicBoolean removed = new AtomicBoolean();
-        rMapCache.addListener(new EntryRemovedListener() {
-            @Override
-            public void onRemoved(EntryEvent event) {
-                removed.set(true);
-            }
-        });
+        rMapCache.addListener((EntryRemovedListener) event -> removed.set(true));
 
         rMapCache.put(1L, "1");
         rMapCache.put(2L, "2");
@@ -90,12 +223,26 @@ public class RedissonMapCacheTest extends BaseMapTest {
     @Test
     public void testDestroy() {
         RMapCache<String, String> cache = redisson.getMapCache("test");
-        
+        AtomicInteger counter = new AtomicInteger();
+        cache.addListener((EntryCreatedListener<Object, Object>) event -> counter.incrementAndGet());
+
+        cache.fastPut("1", "2");
+
+        Awaitility.await().atMost(Duration.ofSeconds(1))
+                            .untilAsserted(() -> assertThat(counter.get()).isEqualTo(1));
+
         EvictionScheduler evictionScheduler = ((Redisson)redisson).getEvictionScheduler();
         Map<?, ?> map = Reflect.on(evictionScheduler).get("tasks");
         assertThat(map.isEmpty()).isFalse();
         cache.destroy();
         assertThat(map.isEmpty()).isTrue();
+
+        RMapCache<String, String> cache2 = redisson.getMapCache("test");
+        cache2.fastPut("3", "4");
+
+        Awaitility.await().pollDelay(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(counter.get()).isEqualTo(1));
+
     }
     
     @Override
@@ -110,34 +257,46 @@ public class RedissonMapCacheTest extends BaseMapTest {
     
     @Override
     protected <K, V> RMap<K, V> getWriterTestMap(String name, Map<K, V> map) {
-        MapOptions<K, V> options = MapOptions.<K, V>defaults().writer(createMapWriter(map));
+        MapCacheOptions<K, V> options = MapCacheOptions.<K, V>defaults().writer(createMapWriter(map));
         return redisson.getMapCache("test", options);        
     }
     
     @Override
     protected <K, V> RMap<K, V> getWriteBehindTestMap(String name, Map<K, V> map) {
-        MapOptions<K, V> options = MapOptions.<K, V>defaults()
+        MapCacheOptions<K, V> options = MapCacheOptions.<K, V>defaults()
                                     .writer(createMapWriter(map))
                                     .writeMode(WriteMode.WRITE_BEHIND);
         return redisson.getMapCache("test", options);        
     }
-    
+
     @Override
-    protected <K, V> RMap<K, V> getLoaderTestMap(String name, Map<K, V> map) {
-        MapOptions<K, V> options = MapOptions.<K, V>defaults().loader(createMapLoader(map));
-        return redisson.getMapCache("test", options);        
+    protected <K, V> RMap<K, V> getWriteBehindAsyncTestMap(String name, Map<K, V> map) {
+        MapCacheOptions<K, V> options = MapCacheOptions.<K, V>defaults()
+                .writerAsync(createMapWriterAsync(map))
+                .writeMode(WriteMode.WRITE_BEHIND);
+        return redisson.getMapCache("test", options);
     }
-    
+
+    @Override
+    protected <K, V, M extends RMap<K, V>> M getLoaderTestMap(String name, Map<K, V> map) {
+        MapCacheOptions<K, V> options = MapCacheOptions.<K, V>defaults().loader(createMapLoader(map));
+        return (M) redisson.getMapCache("test", options);
+    }
+
+    @Override
+    protected <K, V> RMap<K, V> getLoaderAsyncTestMap(String name, Map<K, V> map) {
+        MapCacheOptions<K, V> options = MapCacheOptions.<K, V>defaults().loaderAsync(createMapLoaderAsync(map));
+        return redisson.getMapCache("test", options);
+    }
+
     @Test
     public void testSizeInMemory() {
-        Assumptions.assumeTrue(RedisRunner.getDefaultRedisServerInstance().getRedisVersion().compareTo("4.0.0") > 0);
-        
         RMapCache<Integer, Integer> map = redisson.getMapCache("test");
         for (int i = 0; i < 10; i++) {
             map.put(i, i, 5, TimeUnit.SECONDS);
         }
         
-        assertThat(map.sizeInMemory()).isGreaterThanOrEqualTo(466);
+        assertThat(map.sizeInMemory()).isGreaterThanOrEqualTo(448);
     }
     
     @Test
@@ -235,8 +394,7 @@ public class RedissonMapCacheTest extends BaseMapTest {
 
     @Test
     public void testExpirationWithMaxSize() throws InterruptedException {
-        Config config = new Config();
-        config.useSingleServer().setAddress(RedisRunner.getDefaultRedisServerBindAddressAndPort());
+        Config config = redisson.getConfig();
         config.setMaxCleanUpDelay(2);
         config.setMinCleanUpDelay(1);
         RedissonClient redisson = Redisson.create(config);
@@ -292,7 +450,7 @@ public class RedissonMapCacheTest extends BaseMapTest {
                 return size() > maxSize.get();
             }
         };
-        MapOptions<String, String> options = MapOptions.<String, String>defaults().writer(createMapWriter(store));
+        MapCacheOptions<String, String> options = MapCacheOptions.<String, String>defaults().writer(createMapWriter(store));
         RMapCache<String, String> map = redisson.getMapCache("test", options);
         assertThat(map.trySetMaxSize(maxSize.get())).isTrue();
         assertThat(map.trySetMaxSize(1)).isFalse();
@@ -500,7 +658,7 @@ public class RedissonMapCacheTest extends BaseMapTest {
         RMapCache<String, String> cache = redisson.getMapCache("simple");
         cache.put("0", "8", 1, TimeUnit.SECONDS);
 
-        cache.expire(100, TimeUnit.MILLISECONDS);
+        cache.expire(Duration.ofMillis(100));
 
         Thread.sleep(500);
 
@@ -727,6 +885,35 @@ public class RedissonMapCacheTest extends BaseMapTest {
     }
 
     @Test
+    public void testExpirationInCluster() {
+        testInCluster(client -> {
+            Config config = client.getConfig();
+            config.useClusterServers()
+                    .setNameMapper(new NameMapper() {
+                        @Override
+                        public String map(String name) {
+                            return name + "-namemapper-";
+                        }
+
+                        @Override
+                        public String unmap(String name) {
+                            return name.replace("-namemapper-", "");
+                        }
+                    });
+            RedissonClient redisson = Redisson.create(config);
+
+            AtomicBoolean executed = new AtomicBoolean();
+            RMapCache<String, String> map = redisson.getMapCache("simple");
+            map.addListener((EntryExpiredListener) event -> executed.set(true));
+            map.put("1", "2", 1, TimeUnit.SECONDS);
+
+            Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertThat(executed.get()).isTrue());
+
+            redisson.shutdown();
+        });
+    }
+
+    @Test
     public void testReplaceValueTTL() throws InterruptedException {
         RMapCache<SimpleKey, SimpleValue> map = redisson.getMapCache("simple");
         map.put(new SimpleKey("1"), new SimpleValue("2"), 1, TimeUnit.SECONDS);
@@ -744,34 +931,34 @@ public class RedissonMapCacheTest extends BaseMapTest {
     @Test
     public void testReplaceValueTTLIdleUpdate() throws InterruptedException {
         RMapCache<SimpleKey, SimpleValue> map = null;
-		SimpleValue val1;
-		try {
-			map = redisson.getMapCache("simple");
-			map.put(new SimpleKey("1"), new SimpleValue("2"), 2, TimeUnit.SECONDS, 1, TimeUnit.SECONDS);
+        SimpleValue val1;
+        try {
+            map = redisson.getMapCache("simple");
+            map.put(new SimpleKey("1"), new SimpleValue("2"), 2, TimeUnit.SECONDS, 1, TimeUnit.SECONDS);
 
-			Thread.sleep(750);
-		
-			// update value, would like idle timeout to be refreshed
-			SimpleValue res = map.replace(new SimpleKey("1"), new SimpleValue("3"));
-			assertThat(res).isNotNull();
+            Thread.sleep(750);
 
-			Thread.sleep(750);
+            // update value, would like idle timeout to be refreshed
+            SimpleValue res = map.replace(new SimpleKey("1"), new SimpleValue("3"));
+            assertThat(res).isNotNull();
 
-			// if idle timeout has been updated val1 will be not be null, else it will be null
-			val1 = map.get(new SimpleKey("1"));
-			assertThat(val1).isNotNull(); 
+            Thread.sleep(750);
 
-			Thread.sleep(750);
-			
-			// val1 will have expired due to TTL
-			val1 = map.get(new SimpleKey("1"));
-			assertThat(val1).isNull();
+            // if idle timeout has been updated val1 will be not be null, else it will be null
+            val1 = map.get(new SimpleKey("1"));
+            assertThat(val1).isNotNull();
 
-		} catch (Exception e) {
-			e.printStackTrace();
-		} finally {
-	        map.remove(new SimpleKey("1"));
-		}
+            Thread.sleep(750);
+
+            // val1 will have expired due to TTL
+            val1 = map.get(new SimpleKey("1"));
+            assertThat(val1).isNull();
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            map.remove(new SimpleKey("1"));
+        }
     }
 
     @Test
@@ -846,7 +1033,83 @@ public class RedissonMapCacheTest extends BaseMapTest {
         Assertions.assertNull(map.get(new SimpleKey("55")));
         map.destroy();
     }
-    
+
+    @Test
+    public void testPutAllGetMaxIdle() throws InterruptedException {
+        RMapCache<SimpleKey, SimpleValue> map = redisson.getMapCache("simple06idle");
+        Assertions.assertNull(map.get(new SimpleKey("33")));
+        Assertions.assertNull(map.get(new SimpleKey("55")));
+
+        Map<SimpleKey, SimpleValue> entries = new HashMap<>();
+        entries.put(new SimpleKey("33"), new SimpleValue("44"));
+        entries.put(new SimpleKey("55"), new SimpleValue("66"));
+        map.putAll(entries, 0, null, 2, TimeUnit.SECONDS);
+
+        // alive immediately after putAll
+        Assertions.assertEquals(new SimpleValue("44"), map.get(new SimpleKey("33")));
+        Assertions.assertEquals(new SimpleValue("66"), map.get(new SimpleKey("55")));
+
+        // still alive within the idle window (the previous get() call refreshed it)
+        Thread.sleep(1000);
+        Assertions.assertEquals(new SimpleValue("44"), map.get(new SimpleKey("33")));
+        Assertions.assertEquals(new SimpleValue("66"), map.get(new SimpleKey("55")));
+
+        // expired after the idle window elapses with no further access
+        Thread.sleep(2500);
+        Assertions.assertNull(map.get(new SimpleKey("33")));
+        Assertions.assertNull(map.get(new SimpleKey("55")));
+        map.destroy();
+    }
+
+    @Test
+    public void testPutAllGetTTLAndMaxIdle() throws InterruptedException {
+        RMapCache<SimpleKey, SimpleValue> map = redisson.getMapCache("simple06ttlidle");
+
+        Map<SimpleKey, SimpleValue> entries = new HashMap<>();
+        entries.put(new SimpleKey("33"), new SimpleValue("44"));
+        entries.put(new SimpleKey("55"), new SimpleValue("66"));
+        // ttl is the shorter of the two windows, so it should determine expiration
+        // even when reads keep refreshing the idle window
+        map.putAll(entries, 2, TimeUnit.SECONDS, 10, TimeUnit.SECONDS);
+
+        Assertions.assertEquals(new SimpleValue("44"), map.get(new SimpleKey("33")));
+        Assertions.assertEquals(new SimpleValue("66"), map.get(new SimpleKey("55")));
+
+        // halfway through the TTL: reads refresh idle to ~11s out, but TTL is unaffected
+        Thread.sleep(1000);
+        Assertions.assertEquals(new SimpleValue("44"), map.get(new SimpleKey("33")));
+        Assertions.assertEquals(new SimpleValue("66"), map.get(new SimpleKey("55")));
+
+        // past the TTL window, both entries must be gone regardless of idle refreshes
+        Thread.sleep(1500);
+        Assertions.assertNull(map.get(new SimpleKey("33")));
+        Assertions.assertNull(map.get(new SimpleKey("55")));
+        map.destroy();
+    }
+
+    @Test
+    public void testPutAllWithListener() throws InterruptedException {
+        RMapCache<SimpleKey, SimpleValue> map = redisson.getMapCache("simple");
+        SimpleEntryCreatedListener listener = new SimpleEntryCreatedListener();
+        map.addListener(listener);
+
+        Assertions.assertNull(map.get(new SimpleKey("33")));
+        Assertions.assertNull(map.get(new SimpleKey("55")));
+
+        Map<SimpleKey, SimpleValue> entries = new HashMap<>();
+        entries.put(new SimpleKey("33"), new SimpleValue("44"));
+        entries.put(new SimpleKey("55"), new SimpleValue("66"));
+        map.putAll(entries);
+
+        SimpleValue val1 = map.get(new SimpleKey("33"));
+        Assertions.assertEquals("44", val1.getValue());
+        SimpleValue val2 = map.get(new SimpleKey("55"));
+        Assertions.assertEquals("66", val2.getValue());
+        Assertions.assertEquals(entries, listener.getCreatedEntries());
+
+        map.destroy();
+    }
+
     @Test
     public void testPutIfAbsentTTL() throws Exception {
         RMapCache<SimpleKey, SimpleValue> map = redisson.getMapCache("simple");
@@ -873,6 +1136,26 @@ public class RedissonMapCacheTest extends BaseMapTest {
         Assertions.assertNull(map.putIfAbsent(key1, value1, 2, TimeUnit.SECONDS));
         Assertions.assertEquals(value1, map.get(key1));
         map.destroy();
+    }
+
+    @Test
+    public void testPutIfAbsentTTLKeepsFirstValue() throws InterruptedException {
+        Config config = createConfig();
+        config.setMaxCleanUpDelay(2);
+        config.setMinCleanUpDelay(1);
+        RedissonClient redisson = Redisson.create(config);
+
+        RMapCache<String, String> map = redisson.getMapCache("testPutIfAbsentTTLKeepsFirstValue");
+        assertThat(map.putIfAbsent("key", "value-1", 300, TimeUnit.SECONDS)).isNull();
+        assertThat(map.putIfAbsent("key", "value-2", 300, TimeUnit.SECONDS)).isEqualTo("value-1");
+
+        Thread.sleep(3000);
+
+        assertThat(map.get("key")).isEqualTo("value-1");
+        assertThat(map.putIfAbsent("key", "value-3", 300, TimeUnit.SECONDS)).isEqualTo("value-1");
+        assertThat(map.remainTimeToLive("key")).isBetween(290000L, 300000L);
+
+        redisson.shutdown();
     }
 
     @Test
@@ -921,22 +1204,17 @@ public class RedissonMapCacheTest extends BaseMapTest {
 
     private void checkCreatedListener(RMapCache<Integer, Integer> map, Integer key, Integer value, Runnable runnable) {
         AtomicBoolean ref = new AtomicBoolean();
-        int createListener1 = map.addListener(new EntryCreatedListener<Integer, Integer>() {
+        int createListener1 = map.addListener((EntryCreatedListener<Integer, Integer>) event -> {
+            try {
+                assertThat(event.getKey()).isEqualTo(key);
+                assertThat(event.getValue()).isEqualTo(value);
 
-            @Override
-            public void onCreated(EntryEvent<Integer, Integer> event) {
-                try {
-                    assertThat(event.getKey()).isEqualTo(key);
-                    assertThat(event.getValue()).isEqualTo(value);
-                    
-                    if (!ref.compareAndSet(false, true)) {
-                        Assertions.fail();
-                    }
-                } catch (Exception e) {
-                    e.printStackTrace();
+                if (!ref.compareAndSet(false, true)) {
+                    Assertions.fail();
                 }
+            } catch (Exception e) {
+                e.printStackTrace();
             }
-            
         });
         runnable.run();
 
@@ -964,6 +1242,9 @@ public class RedissonMapCacheTest extends BaseMapTest {
         map.put(14, 1);
         checkUpdatedListener(map, 14, 2, 1, () -> map.replace(14, 2));
         checkUpdatedListener(map, 14, 3, 2, () -> map.replace(14, 2, 3));
+
+        map.put(15, 1);
+        checkUpdatedListener(map, 15, 9, 1, () -> map.fastPutIfExists(15, 9));
         map.destroy();
         
         RMapCache<Integer, Integer> map2 = redisson.getMapCache("simple2", new CompositeCodec(redisson.getConfig().getCodec(), IntegerCodec.INSTANCE));
@@ -986,18 +1267,13 @@ public class RedissonMapCacheTest extends BaseMapTest {
 
     private void checkExpiredListener(RMapCache<Integer, Integer> map, Integer key, Integer value, Runnable runnable) {
         AtomicBoolean ref = new AtomicBoolean();
-        int createListener1 = map.addListener(new EntryExpiredListener<Integer, Integer>() {
+        int createListener1 = map.addListener((EntryExpiredListener<Integer, Integer>) event -> {
+            assertThat(event.getKey()).isEqualTo(key);
+            assertThat(event.getValue()).isEqualTo(value);
 
-            @Override
-            public void onExpired(EntryEvent<Integer, Integer> event) {
-                assertThat(event.getKey()).isEqualTo(key);
-                assertThat(event.getValue()).isEqualTo(value);
-                
-                if (!ref.compareAndSet(false, true)) {
-                    Assertions.fail();
-                }
+            if (!ref.compareAndSet(false, true)) {
+                Assertions.fail();
             }
-            
         });
         runnable.run();
 
@@ -1008,19 +1284,14 @@ public class RedissonMapCacheTest extends BaseMapTest {
     
     private void checkUpdatedListener(RMapCache<Integer, Integer> map, Integer key, Integer value, Integer oldValue, Runnable runnable) {
         AtomicBoolean ref = new AtomicBoolean();
-        int createListener1 = map.addListener(new EntryUpdatedListener<Integer, Integer>() {
+        int createListener1 = map.addListener((EntryUpdatedListener<Integer, Integer>) event -> {
+            assertThat(event.getKey()).isEqualTo(key);
+            assertThat(event.getValue()).isEqualTo(value);
+            assertThat(event.getOldValue()).isEqualTo(oldValue);
 
-            @Override
-            public void onUpdated(EntryEvent<Integer, Integer> event) {
-                assertThat(event.getKey()).isEqualTo(key);
-                assertThat(event.getValue()).isEqualTo(value);
-                assertThat(event.getOldValue()).isEqualTo(oldValue);
-                
-                if (!ref.compareAndSet(false, true)) {
-                    Assertions.fail();
-                }
+            if (!ref.compareAndSet(false, true)) {
+                Assertions.fail();
             }
-            
         });
         runnable.run();
 
@@ -1057,18 +1328,13 @@ public class RedissonMapCacheTest extends BaseMapTest {
     
     private void checkRemovedListener(RMapCache<Integer, Integer> map, Integer key, Integer value, Runnable runnable) {
         AtomicBoolean ref = new AtomicBoolean();
-        int createListener1 = map.addListener(new EntryRemovedListener<Integer, Integer>() {
+        int createListener1 = map.addListener((EntryRemovedListener<Integer, Integer>) event -> {
+            assertThat(event.getKey()).isEqualTo(key);
+            assertThat(event.getValue()).isEqualTo(value);
 
-            @Override
-            public void onRemoved(EntryEvent<Integer, Integer> event) {
-                assertThat(event.getKey()).isEqualTo(key);
-                assertThat(event.getValue()).isEqualTo(value);
-                
-                if (!ref.compareAndSet(false, true)) {
-                    Assertions.fail();
-                }
+            if (!ref.compareAndSet(false, true)) {
+                Assertions.fail();
             }
-            
         });
         runnable.run();
 
@@ -1232,11 +1498,52 @@ public class RedissonMapCacheTest extends BaseMapTest {
     }
 
     @Test
+    public void testReadAllEntrySetWithPattern() throws ExecutionException, InterruptedException {
+        RMapCache<String, String> map = redisson.getMapCache("simple12", StringCodec.INSTANCE);
+        map.put("10", "12");
+        map.put("12", "33", 5, TimeUnit.SECONDS, 60, TimeUnit.SECONDS);
+        map.put("21", "43");
+        assertThat((map.readAllEntrySetAsync("1?")).get().size()).isEqualTo(2);
+
+        Thread.sleep(6000);
+
+        assertThat((map.readAllEntrySetAsync("1?")).get().size()).isEqualTo(1);
+    }
+
+    @Test
+    public void testReadAllKeySetWithPattern() throws ExecutionException, InterruptedException {
+        RMapCache<String, String> map = redisson.getMapCache("simple12", StringCodec.INSTANCE);
+        map.put("10", "12");
+        map.put("12", "33", 5, TimeUnit.SECONDS, 60, TimeUnit.SECONDS);
+        map.put("21", "43");
+        assertThat((map.readAllKeySetAsync("1?")).get()).containsOnly("10", "12");
+
+        Thread.sleep(6000);
+
+        assertThat((map.readAllKeySetAsync("1?")).get()).containsOnly("10");
+    }
+
+    @Test
+    public void testReadAllValuesWithPattern() throws ExecutionException, InterruptedException {
+        RMapCache<String, String> map = redisson.getMapCache("simple12", StringCodec.INSTANCE);
+        map.put("10", "12");
+        map.put("12", "33", 5, TimeUnit.SECONDS, 60, TimeUnit.SECONDS);
+        map.put("21", "43");
+        assertThat((map.readAllValuesAsync("1?")).get()).containsOnly("12", "33");
+
+        Thread.sleep(6000);
+
+        assertThat((map.readAllValuesAsync("1?")).get()).containsOnly("12");
+    }
+
+    @Test
     public void testAddAndGetTTL() {
         RMapCache<String, Object> mapCache = redisson.getMapCache("test_put_if_absent", LongCodec.INSTANCE);
         assertThat(mapCache.putIfAbsent("4", 0L, 10000L, TimeUnit.SECONDS)).isNull();
         assertThat(mapCache.addAndGet("4", 1L)).isEqualTo(1L);
         assertThat(mapCache.putIfAbsent("4", 0L)).isEqualTo(1L);
+        assertThat(mapCache.addAndGet("key", Long.MAX_VALUE-10)).isEqualTo(Long.MAX_VALUE-10);
+        assertThat(mapCache.addAndGet("key", 10L)).isEqualTo(Long.MAX_VALUE);
         Assertions.assertEquals(1L, mapCache.get("4"));
         mapCache.destroy();
         mapCache = redisson.getMapCache("test_put_if_absent_1", LongCodec.INSTANCE);
@@ -1257,7 +1564,17 @@ public class RedissonMapCacheTest extends BaseMapTest {
         mapCache1.destroy();
     }
 
-    
+    @Test
+    public void testAddAndGetMixedNumberTypes() {
+        RMapCache<String, Object> mapCache = redisson.getMapCache("test_addandget_mixed", StringCodec.INSTANCE);
+        mapCache.put("key1", 10.1, 10000L, TimeUnit.SECONDS);
+        assertThat(mapCache.addAndGet("key1", 1)).isEqualTo(11.1);
+        mapCache.put("key2", 20.1, 10000L, TimeUnit.SECONDS);
+        assertThat(mapCache.addAndGet("key2", -10L)).isEqualTo(10.1);
+        mapCache.destroy();
+    }
+
+
     @Test
     public void testFastPutIfAbsentWithTTL() throws Exception {
         RMapCache<SimpleKey, SimpleValue> map = redisson.getMapCache("simpleTTL");
@@ -1282,6 +1599,299 @@ public class RedissonMapCacheTest extends BaseMapTest {
         assertThat(map.fastPutIfAbsent(key, new SimpleValue("5"), 1, TimeUnit.SECONDS, 500, TimeUnit.MILLISECONDS)).isTrue();
         map.destroy();
 
+    }
+
+    @Test
+    public void testComputeIfAbsentWithTTL() throws Exception{
+        RMapCache<String, String> map = redisson.getMapCache("testMap");
+        map.delete();
+        Duration duration = Duration.ofSeconds(1);
+        String value = map.computeIfAbsent("key1",duration, (t1) -> "value1");
+        assertThat("value1".equals(value)).isTrue();
+        value = map.computeIfAbsent("key1", duration, (t1) -> "value2");
+        assertThat("value2".equals(value)).isFalse();
+        Thread.sleep(1100);
+        value = map.computeIfAbsent("key1", duration, (t1) -> "value3");
+        assertThat("value3".equals(value)).isTrue();
+        map.destroy();
+
+    }
+
+    @Test
+    public void testComputeWithTTL() throws Exception {
+        RMapCache<String, String> map = redisson.getMapCache("testMap");
+
+        Duration duration = Duration.ofSeconds(1);
+
+        assertThat(map.compute("key1", duration, (key, oldValue) -> "value1")).isEqualTo("value1");
+        assertThat(map.get("key1")).isEqualTo("value1");
+
+        assertThat(map.compute("key1", duration, (key, oldValue) -> "value2")).isEqualTo("value2");
+        assertThat(map.get("key1")).isEqualTo("value2");
+
+        assertThat(map.compute("key1", duration, (key, oldValue) -> null)).isNull();
+        assertThat(map.containsKey("key1")).isFalse();
+
+        assertThat(map.compute("key1", duration, (key, oldValue) -> "value3")).isEqualTo("value3");
+        assertThat(map.get("key1")).isEqualTo("value3");
+        Thread.sleep(1100);
+        assertThat(map.containsKey("key1")).isFalse();
+
+        map.destroy();
+
+    }
+
+    @Test
+    public void testComputeAsyncWithTTL() throws Exception {
+        RMapCache<String, String> map = redisson.getMapCache("testMap");
+
+        Duration duration = Duration.ofSeconds(1);
+
+        assertThat(map.computeAsync("key1", duration, (key, oldValue) -> "value1").toCompletableFuture().get()).isEqualTo("value1");
+        assertThat(map.get("key1")).isEqualTo("value1");
+
+        assertThat(map.computeAsync("key1", duration, (key, oldValue) -> "value2").toCompletableFuture().get()).isEqualTo("value2");
+        assertThat(map.get("key1")).isEqualTo("value2");
+
+        assertThat(map.computeAsync("key1", duration, (key, oldValue) -> null).toCompletableFuture().get()).isNull();
+        assertThat(map.containsKey("key1")).isFalse();
+
+        assertThat(map.computeAsync("key1", duration, (key, oldValue) -> "value3").toCompletableFuture().get()).isEqualTo("value3");
+        assertThat(map.get("key1")).isEqualTo("value3");
+        Thread.sleep(1100);
+        assertThat(map.containsKey("key1")).isFalse();
+
+        map.destroy();
+
+    }
+
+    @Test
+    public void testNameMapper() throws InterruptedException, ExecutionException {
+        Config config = createConfig();
+        config.useSingleServer()
+                .setNameMapper(new NameMapper() {
+                    @Override
+                    public String map(String name) {
+                        return name + ":suffix:";
+                    }
+
+                    @Override
+                    public String unmap(String name) {
+                        return name.replace(":suffix:", "");
+                    }
+                })
+                .setConnectionMinimumIdleSize(3)
+                .setConnectionPoolSize(3);
+
+        RedissonClient redisson = Redisson.create(config);
+
+        AtomicBoolean executed = new AtomicBoolean();
+        RMapCache<String, String> map = redisson.getMapCache("test");
+        map.addListener((EntryExpiredListener) event -> executed.set(true));
+        map.put("1", "2", 1, TimeUnit.SECONDS);
+
+        Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertThat(executed.get()).isTrue());
+
+        RedisClientConfig destinationCfg = new RedisClientConfig();
+        destinationCfg.setAddress(redisson.getConfig().useSingleServer().getAddress());
+        RedisClient client = RedisClient.create(destinationCfg);
+        RedisConnection destinationConnection = client.connect();
+        List<String> channels = destinationConnection.sync(RedisCommands.PUBSUB_CHANNELS);
+        assertThat(channels).contains("redisson_map_cache_expired:{test:suffix:}");
+        client.shutdown();
+
+        redisson.shutdown();
+    }
+
+    @Test
+    public void testLeaseGet() {
+        RMapCache<String, String> map = redisson.getMapCache("testLeaseGet");
+
+        LeaseGetResult<String> r1 = map.getWithLease("aaa", Duration.ofSeconds(10));
+        assertThat(r1.getValue()).isNull();
+        assertThat(r1.getLeaseToken()).isNotNull();
+        assertThat(r1.isLeaseAcquired()).isTrue();
+
+        LeaseGetResult<String> r2 = map.getWithLease("aaa", Duration.ofSeconds(10));
+        assertThat(r2.getValue()).isNull();
+        assertThat(r2.getLeaseToken()).isNotNull();
+        assertThat(r2.isLeaseAcquired()).isFalse();
+        assertThat(r2.getLeaseToken()).isEqualTo(r1.getLeaseToken());
+    }
+
+    @Test
+    public void testLeasePutTTL() throws InterruptedException {
+        RMapCache<String, String> map = redisson.getMapCache("testLeaseGet");
+
+        LeaseGetResult<String> r1 = map.getWithLease("aaa", Duration.ofSeconds(10));
+        assertThat(r1.getValue()).isNull();
+        assertThat(r1.getLeaseToken()).isNotNull();
+        assertThat(r1.isLeaseAcquired()).isTrue();
+
+        map.putWithLease("aaa", "111", Duration.ofMillis(1000), r1.getLeaseToken());
+
+        Thread.sleep(1100);
+
+        LeaseGetResult<String> r2 = map.getWithLease("aaa", Duration.ofSeconds(10));
+        assertThat(r2.getValue()).isNull();
+        assertThat(r2.getLeaseToken()).isNotNull();
+        assertThat(r2.isLeaseAcquired()).isTrue();
+        assertThat(r2.getLeaseToken()).isNotEqualTo(r1.getLeaseToken());
+    }
+
+    @Test
+    public void testLeaseStaleSet() {
+        RMapCache<String, String> map = redisson.getMapCache("testLeaseStaleSet");
+
+        LeaseGetResult<String> r1 = map.getWithLease("aaa", Duration.ofSeconds(10));
+        assertThat(r1.getValue()).isNull();
+        assertThat(r1.getLeaseToken()).isNotNull();
+        assertThat(r1.isLeaseAcquired()).isTrue();
+
+        map.removeWithLease("aaa");
+        assertThat(map.putWithLease("aaa", "111", r1.getLeaseToken())).isFalse();
+    }
+
+    @Test
+    public void testLeaseTimeout() throws InterruptedException {
+        RMapCache<String, String> map = redisson.getMapCache("testLeaseTimeout");
+
+        LeaseGetResult<String> r1 = map.getWithLease("aaa", Duration.ofSeconds(1));
+        assertThat(r1.getValue()).isNull();
+        assertThat(r1.getLeaseToken()).isNotNull();
+        assertThat(r1.isLeaseAcquired()).isTrue();
+
+        Thread.sleep(1100);
+
+        LeaseGetResult<String> r2 = map.getWithLease("aaa", Duration.ofSeconds(10));
+        assertThat(r2.getValue()).isNull();
+        assertThat(r2.getLeaseToken()).isNotNull();
+        assertThat(r2.isLeaseAcquired()).isTrue();
+        assertThat(r2.getLeaseToken()).isNotEqualTo(r1.getLeaseToken());
+    }
+
+    @Test
+    public void testLeaseDifferentKeys() throws InterruptedException {
+        RMapCache<String, String> map = redisson.getMapCache("testLeaseDifferentKeys");
+
+        LeaseGetResult<String> r1 = map.getWithLease("aaa", Duration.ofSeconds(1));
+        assertThat(r1.getValue()).isNull();
+        assertThat(r1.getLeaseToken()).isNotNull();
+        assertThat(r1.isLeaseAcquired()).isTrue();
+
+        LeaseGetResult<String> r2 = map.getWithLease("bbb", Duration.ofSeconds(10));
+        assertThat(r2.getValue()).isNull();
+        assertThat(r2.getLeaseToken()).isNotNull();
+        assertThat(r2.isLeaseAcquired()).isTrue();
+        assertThat(r2.getLeaseToken()).isNotEqualTo(r1.getLeaseToken());
+    }
+
+    @Test
+    public void testLeaseExpirationWithMaxSize() throws InterruptedException {
+        Config config = new Config();
+        config.useSingleServer().setAddress(redisson.getConfig().useSingleServer().getAddress());
+        config.setMaxCleanUpDelay(2);
+        config.setMinCleanUpDelay(1);
+        RedissonClient redisson = Redisson.create(config);
+
+        RMapCache<String, String> map = redisson.getMapCache("test", StringCodec.INSTANCE);
+        assertThat(map.trySetMaxSize(2)).isTrue();
+
+        LeaseGetResult<String> r = map.getWithLease("1", Duration.ofSeconds(10));
+        map.putWithLease("1", "1", r.getLeaseToken());
+
+        r = map.getWithLease("2", Duration.ofSeconds(10));
+        map.putWithLease("2", "2", r.getLeaseToken());
+
+        r = map.getWithLease("3", Duration.ofSeconds(10));
+        map.putWithLease("3", "3", r.getLeaseToken());
+
+        r = map.getWithLease("4", Duration.ofSeconds(10));
+        map.putWithLease("4", "4", r.getLeaseToken());
+
+        Thread.sleep(8000);
+
+        assertThat(map.size()).isEqualTo(2);
+        redisson.shutdown();
+    }
+
+    @Test
+    public void testLeaseRaceCondition() throws InterruptedException {
+        final int RUN = 10;
+        final int CONCURRENCY = 16;
+        ExecutorService executorService = Executors.newFixedThreadPool(CONCURRENCY);
+        for (int i = 0; i < RUN; i++) {
+            RMapCache<String, String> map = redisson.getMapCache("testLeaseRaceCondition", StringCodec.INSTANCE);
+            CountDownLatch latch = new CountDownLatch(CONCURRENCY);
+            AtomicInteger trueCount = new AtomicInteger();
+            final String key = "key:" + i;
+            for (int j = 0; j < CONCURRENCY; j++) {
+                executorService.submit(() -> {
+                    LeaseGetResult<String> r = map.getWithLease(key, Duration.ofSeconds(10));
+                    if (r.isLeaseAcquired()) {
+                        trueCount.incrementAndGet();
+                    }
+                    latch.countDown();
+                });
+            }
+
+
+            latch.await();
+
+            assertThat(trueCount.get()).isEqualTo(1);
+        }
+
+        executorService.shutdown();
+        executorService.awaitTermination(100, TimeUnit.SECONDS);
+    }
+
+    @Test
+    public void testLeaseCreatedListener() {
+        RMapCache<String, String> map = redisson.getMapCache("testLeaseCreatedListener");
+        AtomicBoolean created = new AtomicBoolean(false);
+
+        LeaseGetResult<String> r1 = map.getWithLease("aaa", Duration.ofSeconds(1));
+        map.addListener((EntryCreatedListener<Object, Object>) event -> created.set(true));
+
+        map.putWithLease("aaa", "111", r1.getLeaseToken());
+
+        Awaitility.await().atMost(5, TimeUnit.SECONDS).untilTrue(created);
+    }
+
+    @Test
+    public void testLeaseRemovedListener() {
+        RMapCache<String, String> map = redisson.getMapCache("testLeaseCreatedListener");
+        AtomicBoolean removed = new AtomicBoolean();
+
+        LeaseGetResult<String> r1 = map.getWithLease("aaa", Duration.ofSeconds(1));
+        map.addListener((EntryRemovedListener) event -> removed.set(true));
+
+        map.putWithLease("aaa", "111", r1.getLeaseToken());
+        map.removeWithLease("aaa");
+
+        Awaitility.await().atMost(5, TimeUnit.SECONDS).untilTrue(removed);
+    }
+
+    @Test
+    public void testCopyPreservesTTL() {
+        testInCluster(redisson -> {
+            RMapCache<String, String> map = redisson.getMapCache("testCopySrc");
+            map.put("key1", "val1", 10, TimeUnit.SECONDS);
+            map.put("key2", "val2");
+
+            map.copy("testCopyDst");
+
+            RMapCache<String, String> mapCopy = redisson.getMapCache("testCopyDst");
+            assertThat(mapCopy.get("key1")).isEqualTo("val1");
+            assertThat(mapCopy.get("key2")).isEqualTo("val2");
+
+            long ttl = mapCopy.remainTimeToLive("key1");
+            assertThat(ttl).isBetween(5000L, 10000L);
+            assertThat(mapCopy.remainTimeToLive("key2")).isEqualTo(-1);
+
+            map.destroy();
+            mapCopy.destroy();
+        });
     }
 }
 

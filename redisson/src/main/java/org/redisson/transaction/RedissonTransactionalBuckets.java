@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,18 +21,24 @@ import org.redisson.RedissonMultiLock;
 import org.redisson.api.RFuture;
 import org.redisson.api.RKeys;
 import org.redisson.api.RLock;
+import org.redisson.api.bucket.SetParams;
+import org.redisson.api.bucket.SetArgs;
 import org.redisson.client.codec.Codec;
 import org.redisson.command.CommandAsyncExecutor;
-import org.redisson.misc.RPromise;
-import org.redisson.misc.RedissonPromise;
+import org.redisson.misc.CompletableFutureWrapper;
 import org.redisson.transaction.operation.TransactionalOperation;
 import org.redisson.transaction.operation.bucket.BucketSetOperation;
+import org.redisson.transaction.operation.bucket.BucketsSetIfAllKeysAbsentOperation;
+import org.redisson.transaction.operation.bucket.BucketsSetIfAllKeysExistOperation;
 import org.redisson.transaction.operation.bucket.BucketsTrySetOperation;
 
 import java.util.*;
 import java.util.Map.Entry;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 /**
  * 
@@ -43,10 +49,10 @@ public class RedissonTransactionalBuckets extends RedissonBuckets {
 
     static final Object NULL = new Object();
     
-    private long timeout;
+    private final long timeout;
     private final AtomicBoolean executed;
     private final List<TransactionalOperation> operations;
-    private Map<String, Object> state = new HashMap<>();
+    private final Map<String, Object> state = new HashMap<>();
     private final String transactionId;
     
     public RedissonTransactionalBuckets(CommandAsyncExecutor commandExecutor, 
@@ -74,7 +80,7 @@ public class RedissonTransactionalBuckets extends RedissonBuckets {
         checkState();
         
         if (keys.length == 0) {
-            return RedissonPromise.newSucceededFuture(Collections.emptyMap());
+            return new CompletableFutureWrapper<>(Collections.emptyMap());
         }
         
         Set<String> keysToLoad = new HashSet<>();
@@ -91,39 +97,33 @@ public class RedissonTransactionalBuckets extends RedissonBuckets {
         }
         
         if (keysToLoad.isEmpty()) {
-            return RedissonPromise.newSucceededFuture(map);
+            return new CompletableFutureWrapper<>(map);
         }
         
-        RPromise<Map<String, V>> result = new RedissonPromise<>();
-        super.getAsync(keysToLoad.toArray(new String[keysToLoad.size()])).onComplete((res, e) -> {
-            if (e != null) {
-                result.tryFailure(e);
-                return;
-            }
-            
+        CompletionStage<Map<String, V>> f = super.getAsync(keysToLoad.toArray(new String[0])).thenApply(res -> {
             map.putAll((Map<String, V>) res);
-            result.trySuccess(map);
+            return map;
         });
-        return result;
+        return new CompletableFutureWrapper<>(f);
     }
     
     @Override
     public RFuture<Void> setAsync(Map<String, ?> buckets) {
         checkState();
         
-        RPromise<Void> result = new RedissonPromise<>();
-        executeLocked(result, () -> {
+        long currentThreadId = Thread.currentThread().getId();
+        return executeLocked(() -> {
             for (Entry<String, ?> entry : buckets.entrySet()) {
-                operations.add(new BucketSetOperation<>(entry.getKey(), getLockName(entry.getKey()), codec, entry.getValue(), transactionId));
+                operations.add(new BucketSetOperation<>(entry.getKey(), getLockName(entry.getKey()),
+                                        codec, entry.getValue(), transactionId, currentThreadId));
                 if (entry.getValue() == null) {
                     state.put(entry.getKey(), NULL);
                 } else {
                     state.put(entry.getKey(), entry.getValue());
                 }
             }
-            result.trySuccess(null);
+            return CompletableFuture.completedFuture(null);
         }, buckets.keySet());
-        return result;
     }
     
 //    Add RKeys.deleteAsync support
@@ -178,16 +178,14 @@ public class RedissonTransactionalBuckets extends RedissonBuckets {
     public RFuture<Boolean> trySetAsync(Map<String, ?> buckets) {
         checkState();
         
-        RPromise<Boolean> result = new RedissonPromise<>();
-        executeLocked(result, () -> {
+        return executeLocked(() -> {
             Set<String> keysToSet = new HashSet<>();
             for (String key : buckets.keySet()) {
                 Object value = state.get(key);
                 if (value != null) {
                     if (value != NULL) {
                         operations.add(new BucketsTrySetOperation(codec, (Map<String, Object>) buckets, transactionId));
-                        result.trySuccess(false);
-                        return;
+                        return CompletableFuture.completedFuture(false);
                     }
                 } else {
                     keysToSet.add(key);
@@ -197,46 +195,121 @@ public class RedissonTransactionalBuckets extends RedissonBuckets {
             if (keysToSet.isEmpty()) {
                 operations.add(new BucketsTrySetOperation(codec, (Map<String, Object>) buckets, transactionId));
                 state.putAll(buckets);
-                result.trySuccess(true);
-                return;
+                return CompletableFuture.completedFuture(true);
             }
             
             RKeys keys = new RedissonKeys(commandExecutor);
             String[] ks = keysToSet.toArray(new String[keysToSet.size()]);
-            keys.countExistsAsync(ks).onComplete((res, e) -> {
-                if (e != null) {
-                    result.tryFailure(e);
-                    return;
-                }
-                
+            return keys.countExistsAsync(ks).thenApply(res -> {
                 operations.add(new BucketsTrySetOperation(codec, (Map<String, Object>) buckets, transactionId));
                 if (res == 0) {
                     state.putAll(buckets);
-                    result.trySuccess(true);
+                    return true;
                 } else {
-                    result.trySuccess(false);
+                    return false;
                 }
             });
         }, buckets.keySet());
-        return result;
+    }
+
+    @Override
+    public RFuture<Boolean> setIfAllKeysExistAsync(SetArgs args) {
+        checkState();
+
+        SetParams pps = (SetParams) args;
+        Map<String, ?> buckets = pps.getEntries();
+
+        return executeLocked(() -> {
+            Set<String> keysToSet = new HashSet<>();
+            for (String key : buckets.keySet()) {
+                Object value = state.get(key);
+                if (value != null) {
+                    if (value == NULL) {
+                        operations.add(new BucketsSetIfAllKeysExistOperation(codec, args, transactionId));
+                        return CompletableFuture.completedFuture(false);
+                    }
+                } else {
+                    keysToSet.add(key);
+                }
+            }
+
+            if (keysToSet.isEmpty()) {
+                operations.add(new BucketsSetIfAllKeysExistOperation(codec, args, transactionId));
+                state.putAll(buckets);
+                return CompletableFuture.completedFuture(true);
+            }
+
+            RKeys keys = new RedissonKeys(commandExecutor);
+            String[] ks = keysToSet.toArray(new String[keysToSet.size()]);
+            return keys.countExistsAsync(ks).thenApply(res -> {
+                operations.add(new BucketsSetIfAllKeysExistOperation(codec, args, transactionId));
+                if (Objects.equals(res, (long) keysToSet.size())) {
+                    state.putAll(buckets);
+                    return true;
+                } else {
+                    return false;
+                }
+            });
+        }, buckets.keySet());
+    }
+
+    @Override
+    public RFuture<Boolean> setIfAllKeysAbsentAsync(SetArgs args) {
+        checkState();
+
+        SetParams pps = (SetParams) args;
+        Map<String, ?> buckets = pps.getEntries();
+
+        return executeLocked(() -> {
+            Set<String> keysToSet = new HashSet<>();
+            for (String key : buckets.keySet()) {
+                Object value = state.get(key);
+                if (value != null) {
+                    if (value != NULL) {
+                        operations.add(new BucketsSetIfAllKeysAbsentOperation(codec, args, transactionId));
+                        return CompletableFuture.completedFuture(false);
+                    }
+                } else {
+                    keysToSet.add(key);
+                }
+            }
+
+            if (keysToSet.isEmpty()) {
+                operations.add(new BucketsSetIfAllKeysAbsentOperation(codec, args, transactionId));
+                state.putAll(buckets);
+                return CompletableFuture.completedFuture(true);
+            }
+
+            RKeys keys = new RedissonKeys(commandExecutor);
+            String[] ks = keysToSet.toArray(new String[keysToSet.size()]);
+            return keys.countExistsAsync(ks).thenApply(res -> {
+                operations.add(new BucketsSetIfAllKeysAbsentOperation(codec, args, transactionId));
+                if (res == 0) {
+                    state.putAll(buckets);
+                    return true;
+                } else {
+                    return false;
+                }
+            });
+        }, buckets.keySet());
     }
     
-    protected <R> void executeLocked(RPromise<R> promise, Runnable runnable, Collection<String> keys) {
+    protected <R> RFuture<R> executeLocked(Supplier<CompletionStage<R>> runnable, Collection<String> keys) {
         List<RLock> locks = new ArrayList<>(keys.size());
         for (String key : keys) {
             RLock lock = getLock(key);
             locks.add(lock);
         }
-        RedissonMultiLock multiLock = new RedissonMultiLock(locks.toArray(new RLock[locks.size()]));
+        RedissonMultiLock multiLock = new RedissonMultiLock(locks.toArray(new RLock[0]));
         long threadId = Thread.currentThread().getId();
-        multiLock.lockAsync(timeout, TimeUnit.MILLISECONDS).onComplete((res, e) -> {
-            if (e == null) {
-                runnable.run();
-            } else {
-                multiLock.unlockAsync(threadId);
-                promise.tryFailure(e);
-            }
-        });
+        CompletionStage<R> f = multiLock.lockAsync(timeout, TimeUnit.MILLISECONDS)
+                .thenCompose(res -> runnable.get())
+                .whenComplete((r, e) -> {
+                    if (e != null) {
+                        multiLock.unlockAsync(threadId);
+                    }
+                });
+        return new CompletableFutureWrapper<>(f);
     }
     
     private RLock getLock(String name) {

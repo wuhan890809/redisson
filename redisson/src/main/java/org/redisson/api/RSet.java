@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package org.redisson.api;
 
 import org.redisson.api.mapreduce.RCollectionMapReduce;
 
+import java.util.Collection;
 import java.util.Iterator;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -29,6 +30,24 @@ import java.util.stream.Stream;
  * @param <V> type of value
  */
 public interface RSet<V> extends Set<V>, RExpirable, RSetAsync<V>, RSortable<Set<V>> {
+
+    /**
+     * Adds all elements contained in the specified collection.
+     * Returns number of added elements.
+     *
+     * @param c - collection of elements to add
+     * @return number of added elements
+     */
+    int addAllCounted(Collection<? extends V> c);
+
+    /**
+     * Removes all elements contained in the specified collection.
+     * Returns number of removed elements.
+     *
+     * @param c - collection of elements to add
+     * @return number of removed elements
+     */
+    int removeAllCounted(Collection<? extends V> c);
 
     /**
      * Returns <code>RCountDownLatch</code> instance associated with <code>value</code>
@@ -135,7 +154,36 @@ public interface RSet<V> extends Set<V>, RExpirable, RSetAsync<V>, RSortable<Set
      * @return iterator
      */
     Iterator<V> iterator(String pattern);
-    
+
+    /**
+     * Returns element iterator that can be shared across multiple applications.
+     * Creating multiple iterators on the same object with this method will result in a single shared iterator.
+     * See {@linkplain RSet#distributedIterator(String, String, int)} for creating different iterators.
+     * @param count batch size
+     * @return shared elements iterator
+     */
+    Iterator<V> distributedIterator(int count);
+
+    /**
+     * Returns iterator over elements that match specified pattern. Iterator can be shared across multiple applications.
+     * Creating multiple iterators on the same object with this method will result in a single shared iterator.
+     * See {@linkplain RSet#distributedIterator(String, String, int)} for creating different iterators.
+     * @param pattern element pattern
+     * @return shared elements iterator
+     */
+    Iterator<V> distributedIterator(String pattern);
+
+    /**
+     * Returns iterator over elements that match specified pattern. Iterator can be shared across multiple applications.
+     * Creating multiple iterators on the same object with this method will result in a single shared iterator.
+     * Iterator name must be resolved to the same hash slot as set name.
+     * @param pattern element pattern
+     * @param count batch size
+     * @param iteratorName redis object name to which cursor will be saved
+     * @return shared elements iterator
+     */
+    Iterator<V> distributedIterator(String iteratorName, String pattern, int count);
+
     /**
      * Returns <code>RMapReduce</code> object associated with this object
      * 
@@ -211,6 +259,52 @@ public interface RSet<V> extends Set<V>, RExpirable, RSetAsync<V>, RSortable<Set
     Set<V> readUnion(String... names);
 
     /**
+     * Counts elements of set as a result of sets union with current set.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return amount of elements
+     */
+    Integer countUnion(String... names);
+
+    /**
+     * Counts elements of set as a result of sets union with current set.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @param limit - sets union limit
+     * @return amount of elements
+     */
+    Integer countUnion(int limit, String... names);
+
+    /**
+     * Counts elements of set as a result of sets union with current set.
+     * Returns an approximate value computed through HyperLogLog with
+     * 0.81% standard error instead of an exact one.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return approximate amount of elements
+     */
+    Integer countUnionApprox(String... names);
+
+    /**
+     * Counts elements of set as a result of sets union with current set.
+     * Returns an approximate value computed through HyperLogLog with
+     * 0.81% standard error instead of an exact one.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @param limit - sets union limit
+     * @return approximate amount of elements
+     */
+    Integer countUnionApprox(int limit, String... names);
+
+    /**
      * Diff sets specified by name and write to current set.
      * If current set already exists, it is overwritten.
      *
@@ -228,6 +322,28 @@ public interface RSet<V> extends Set<V>, RExpirable, RSetAsync<V>, RSortable<Set
      */
 
     Set<V> readDiff(String... names);
+
+    /**
+     * Counts elements of set as a result of sets difference with current set.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return amount of elements
+     */
+    Integer countDiff(String... names);
+
+    /**
+     * Counts elements of set as a result of sets difference with current set.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @param limit - sets difference limit
+     * @return amount of elements
+     */
+    Integer countDiff(int limit, String... names);
+
     /**
      * Intersection sets specified by name and write to current set.
      * If current set already exists, it is overwritten.
@@ -247,6 +363,27 @@ public interface RSet<V> extends Set<V>, RExpirable, RSetAsync<V>, RSortable<Set
     Set<V> readIntersection(String... names);
 
     /**
+     * Counts elements of set as a result of sets intersection with current set.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return amount of elements
+     */
+    Integer countIntersection(String... names);
+
+    /**
+     * Counts elements of set as a result of sets intersection with current set.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @param limit - sets intersection limit
+     * @return amount of elements
+     */
+    Integer countIntersection(int limit, String... names);
+
+    /**
      * Tries to add elements only if none of them in set.
      *
      * @param values - values to add
@@ -254,5 +391,31 @@ public interface RSet<V> extends Set<V>, RExpirable, RSetAsync<V>, RSortable<Set
      *          otherwise <code>false</code>.
      */
     boolean tryAdd(V... values);
+
+    /**
+     * Check if each element is contained in the specified collection.
+     * Returns contained elements.
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param c - collection to check
+     * @return contained elements
+     */
+    Set<V> containsEach(Collection<V> c);
+
+    /**
+     * Adds object event listener
+     *
+     * @see org.redisson.api.listener.TrackingListener
+     * @see org.redisson.api.listener.SetAddListener
+     * @see org.redisson.api.listener.SetRemoveListener
+     * @see org.redisson.api.listener.SetRemoveRandomListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
+     *
+     * @param listener - object event listener
+     * @return listener id
+     */
+    int addListener(ObjectListener listener);
 
 }

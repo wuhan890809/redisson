@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,31 +15,29 @@
  */
 package org.redisson.cache;
 
-import com.github.benmanes.caffeine.cache.Caffeine;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import org.redisson.*;
 import org.redisson.api.*;
-import org.redisson.api.LocalCachedMapOptions.EvictionPolicy;
 import org.redisson.api.LocalCachedMapOptions.ReconnectionStrategy;
 import org.redisson.api.LocalCachedMapOptions.SyncStrategy;
-import org.redisson.api.listener.BaseStatusListener;
-import org.redisson.api.listener.MessageListener;
+import org.redisson.api.listener.*;
 import org.redisson.client.codec.ByteArrayCodec;
 import org.redisson.client.codec.Codec;
+import org.redisson.client.codec.StringCodec;
+import org.redisson.client.protocol.RedisCommands;
+import org.redisson.codec.CompositeCodec;
+import org.redisson.command.BatchService;
 import org.redisson.command.CommandAsyncExecutor;
-import org.redisson.misc.RPromise;
-import org.redisson.misc.RedissonPromise;
+import org.redisson.misc.CompletableFutureWrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 /**
  * 
@@ -47,31 +45,43 @@ import java.util.concurrent.TimeUnit;
  *
  */
 public abstract class LocalCacheListener {
-    
+
     public static final String TOPIC_SUFFIX = "topic";
     public static final String DISABLED_KEYS_SUFFIX = "disabled-keys";
     public static final String DISABLED_ACK_SUFFIX = ":topic";
-    
-    private ConcurrentMap<CacheKey, String> disabledKeys = new ConcurrentHashMap<CacheKey, String>();
-    
+
+    private ConcurrentMap<CacheKey, Set<String>> disabledKeys = new ConcurrentHashMap<>();
+    private Set<String> cacheDisabled = ConcurrentHashMap.newKeySet();
+
     private static final Logger log = LoggerFactory.getLogger(LocalCacheListener.class);
-    
-    private String name;
-    private CommandAsyncExecutor commandExecutor;
-    private Map<?, ?> cache;
+
+    String name;
+    CommandAsyncExecutor commandExecutor;
+    private Map<CacheKey, ? extends CacheValue> cache;
+    private Map<Object, CacheKey> cacheKeyMap;
     private RObject object;
-    private byte[] instanceId = new byte[16];
+    byte[] instanceId;
     private Codec codec;
     private LocalCachedMapOptions<?, ?> options;
-    
+    private final String keyeventPattern;
+
     private long cacheUpdateLogTime;
     private volatile long lastInvalidate;
     private RTopic invalidationTopic;
-    private int syncListenerId;
-    private int reconnectionListenerId;
-    
+    private RPatternTopic patternTopic;
+    private Map<Object, Integer> syncListenerIds = new HashMap<>(2);
+    private Map<Object, Integer> reconnectionListenerIds = new HashMap<>(2);
+
+    private int expireListenerId;
+
+    private final Map<Integer, LocalCacheInvalidateListener<?, ?>> invalidateListeners = new ConcurrentHashMap<>();
+
+    private final Map<Integer, LocalCacheUpdateListener<?, ?>> updateListeners = new ConcurrentHashMap<>();
+
+    private boolean isSharded;
+
     public LocalCacheListener(String name, CommandAsyncExecutor commandExecutor,
-            RObject object, Codec codec, LocalCachedMapOptions<?, ?> options, long cacheUpdateLogTime) {
+                              RObject object, Codec codec, LocalCachedMapOptions<?, ?> options, long cacheUpdateLogTime, boolean isSharded) {
         super();
         this.name = name;
         this.commandExecutor = commandExecutor;
@@ -79,239 +89,384 @@ public abstract class LocalCacheListener {
         this.codec = codec;
         this.options = options;
         this.cacheUpdateLogTime = cacheUpdateLogTime;
-        
-        ThreadLocalRandom.current().nextBytes(instanceId);
+        this.isSharded = isSharded;
+        this.keyeventPattern = "__keyspace@" + commandExecutor.getServiceManager().getConfig().getDatabase() + "__:" + name;
+
+        instanceId = commandExecutor.getServiceManager().generateIdArray();
     }
-    
-    public byte[] generateId() {
-        byte[] id = new byte[16];
-        ThreadLocalRandom.current().nextBytes(id);
-        return id;
-    }
-    
+
     public byte[] getInstanceId() {
         return instanceId;
     }
-    
-    public ConcurrentMap<CacheKey, CacheValue> createCache(LocalCachedMapOptions<?, ?> options) {
-        if (options.getCacheProvider() == LocalCachedMapOptions.CacheProvider.CAFFEINE) {
-            Caffeine<Object, Object> caffeineBuilder = Caffeine.newBuilder();
-            if (options.getTimeToLiveInMillis() > 0) {
-                caffeineBuilder.expireAfterWrite(options.getTimeToLiveInMillis(), TimeUnit.MILLISECONDS);
-            }
-            if (options.getMaxIdleInMillis() > 0) {
-                caffeineBuilder.expireAfterAccess(options.getMaxIdleInMillis(), TimeUnit.MILLISECONDS);
-            }
-            if (options.getCacheSize() > 0) {
-                caffeineBuilder.maximumSize(options.getCacheSize());
-            }
-            if (options.getEvictionPolicy() == LocalCachedMapOptions.EvictionPolicy.SOFT) {
-                caffeineBuilder.softValues();
-            }
-            if (options.getEvictionPolicy() == LocalCachedMapOptions.EvictionPolicy.WEAK) {
-                caffeineBuilder.weakValues();
-            }
-            return caffeineBuilder.<CacheKey, CacheValue>build().asMap();
-        }
 
-        if (options.getEvictionPolicy() == EvictionPolicy.NONE) {
-            return new NoneCacheMap<>(options.getTimeToLiveInMillis(), options.getMaxIdleInMillis());
-        }
-        if (options.getEvictionPolicy() == EvictionPolicy.LRU) {
-            return new LRUCacheMap<>(options.getCacheSize(), options.getTimeToLiveInMillis(), options.getMaxIdleInMillis());
-        }
-        if (options.getEvictionPolicy() == EvictionPolicy.LFU) {
-            return new LFUCacheMap<>(options.getCacheSize(), options.getTimeToLiveInMillis(), options.getMaxIdleInMillis());
-        }
-        if (options.getEvictionPolicy() == EvictionPolicy.SOFT) {
-            return ReferenceCacheMap.soft(options.getTimeToLiveInMillis(), options.getMaxIdleInMillis());
-        }
-        if (options.getEvictionPolicy() == EvictionPolicy.WEAK) {
-            return ReferenceCacheMap.weak(options.getTimeToLiveInMillis(), options.getMaxIdleInMillis());
-        }
-        throw new IllegalArgumentException("Invalid eviction policy: " + options.getEvictionPolicy());
-    }
-    
     public boolean isDisabled(Object key) {
-        return disabledKeys.containsKey(key);
+        return disabledKeys.containsKey(key) || !cacheDisabled.isEmpty();
     }
-    
-    public void add(Map<?, ?> cache) {
+
+    public void add(Map<CacheKey, ? extends CacheValue> cache, Map<Object, CacheKey> cacheKeyMap) {
         this.cache = cache;
-        
-        invalidationTopic = RedissonTopic.createRaw(LocalCachedMessageCodec.INSTANCE, commandExecutor, getInvalidationTopicName());
+        this.cacheKeyMap = cacheKeyMap;
+        createTopic(name, commandExecutor);
+
+        if (options.getExpirationEventPolicy() == LocalCachedMapOptions.ExpirationEventPolicy.SUBSCRIBE_WITH_KEYEVENT_PATTERN) {
+            RPatternTopic topic = new RedissonPatternTopic(StringCodec.INSTANCE, commandExecutor, "__keyevent@*:expired");
+            expireListenerId = topic.addListener(String.class, (pattern, channel, msg) -> {
+                if (msg.equals(name)) {
+                    cache.clear();
+                    if (options.isUseObjectAsCacheKey()) {
+                        cacheKeyMap.clear();
+                    }
+                }
+            });
+        } else if (options.getExpirationEventPolicy() == LocalCachedMapOptions.ExpirationEventPolicy.SUBSCRIBE_WITH_KEYSPACE_CHANNEL) {
+            RTopic topic = new RedissonTopic(StringCodec.INSTANCE, commandExecutor, keyeventPattern);
+            expireListenerId = topic.addListener(String.class, (channel, msg) -> {
+                if (msg.equals("expired")) {
+                    cache.clear();
+                    if (options.isUseObjectAsCacheKey()) {
+                        cacheKeyMap.clear();
+                    }
+                }
+            });
+        }
 
         if (options.getReconnectionStrategy() != ReconnectionStrategy.NONE) {
-            reconnectionListenerId = invalidationTopic.addListener(new BaseStatusListener() {
-                @Override
-                public void onSubscribe(String channel) {
-                    if (options.getReconnectionStrategy() == ReconnectionStrategy.CLEAR) {
-                        cache.clear();
-                    }
-                    if (options.getReconnectionStrategy() == ReconnectionStrategy.LOAD
-                            // check if instance has already been used
-                            && lastInvalidate > 0) {
-
-                        loadAfterReconnection();
-                    }
-                }
-            });
+            addReconnectionListener();
         }
-        
+
         if (options.getSyncStrategy() != SyncStrategy.NONE) {
-            syncListenerId = invalidationTopic.addListener(Object.class, new MessageListener<Object>() {
-                @Override
-                public void onMessage(CharSequence channel, Object msg) {
-                    if (msg instanceof LocalCachedMapDisable) {
-                        LocalCachedMapDisable m = (LocalCachedMapDisable) msg;
-                        String requestId = m.getRequestId();
-                        Set<CacheKey> keysToDisable = new HashSet<CacheKey>();
-                        for (byte[] keyHash : ((LocalCachedMapDisable) msg).getKeyHashes()) {
-                            CacheKey key = new CacheKey(keyHash);
-                            keysToDisable.add(key);
-                        }
-                        
-                        disableKeys(requestId, keysToDisable, m.getTimeout());
-                        
-                        RedissonTopic topic = RedissonTopic.createRaw(LocalCachedMessageCodec.INSTANCE,
-                                                            commandExecutor, RedissonObject.suffixName(name, requestId + DISABLED_ACK_SUFFIX));
-                        topic.publishAsync(new LocalCachedMapDisableAck());
-                    }
-                    
-                    if (msg instanceof LocalCachedMapEnable) {
-                        LocalCachedMapEnable m = (LocalCachedMapEnable) msg;
-                        for (byte[] keyHash : m.getKeyHashes()) {
-                            CacheKey key = new CacheKey(keyHash);
-                            disabledKeys.remove(key, m.getRequestId());
-                        }
-                    }
-                    
-                    if (msg instanceof LocalCachedMapClear) {
-                        LocalCachedMapClear clearMsg = (LocalCachedMapClear) msg;
-                        cache.clear();
+            addMessageListener();
 
-                        if (clearMsg.isReleaseSemaphore()) {
-                            RSemaphore semaphore = getClearSemaphore(clearMsg.getRequestId());
-                            semaphore.releaseAsync();
-                        }
-                    }
-                    
-                    if (msg instanceof LocalCachedMapInvalidate) {
-                        LocalCachedMapInvalidate invalidateMsg = (LocalCachedMapInvalidate) msg;
-                        if (!Arrays.equals(invalidateMsg.getExcludedId(), instanceId)) {
-                            for (byte[] keyHash : invalidateMsg.getKeyHashes()) {
-                                CacheKey key = new CacheKey(keyHash);
-                                cache.remove(key);
-                            }
-                        }
-                    }
-                    
-                    if (msg instanceof LocalCachedMapUpdate) {
-                        LocalCachedMapUpdate updateMsg = (LocalCachedMapUpdate) msg;
-                        
-                        for (LocalCachedMapUpdate.Entry entry : updateMsg.getEntries()) {
-                            ByteBuf keyBuf = Unpooled.wrappedBuffer(entry.getKey());
-                            ByteBuf valueBuf = Unpooled.wrappedBuffer(entry.getValue());
-                            try {
-                                updateCache(keyBuf, valueBuf);
-                            } catch (IOException e) {
-                                log.error("Can't decode map entry", e);
-                            } finally {
-                                keyBuf.release();
-                                valueBuf.release();
-                            }
-                        }
-                        
-                    }
-                    
-                    if (options.getReconnectionStrategy() == ReconnectionStrategy.LOAD) {
-                        lastInvalidate = System.currentTimeMillis();
-                    }
-                }
+            if (commandExecutor instanceof BatchService) {
+                return;
+            }
 
-            });
-            
+            String disabledCachesName = RedissonObject.suffixName(name, RedissonLocalCachedMap.DISABLED_CACHES_SUFFIX);
+            CompositeCodec localCacheCodec = new CompositeCodec(LocalCachedMessageCodec.INSTANCE, StringCodec.INSTANCE, StringCodec.INSTANCE);
+            RSetCache<LocalCachedMapDisabledKey> setCache = new RedissonSetCache<>(LocalCachedMessageCodec.INSTANCE, null, commandExecutor, disabledCachesName, null);
+            for (LocalCachedMapDisabledKey key : setCache.readAll()) {
+                disableCache(key.getRequestId(), key.getTimeout());
+            }
+
             String disabledKeysName = RedissonObject.suffixName(name, DISABLED_KEYS_SUFFIX);
-            RListMultimapCache<LocalCachedMapDisabledKey, String> multimap = new RedissonListMultimapCache<LocalCachedMapDisabledKey, String>(null, codec, commandExecutor, disabledKeysName);
-            
+            RListMultimapCache<LocalCachedMapDisabledKey, String> multimap =
+                    new RedissonListMultimapCache<>(null, localCacheCodec, commandExecutor, disabledKeysName);
+
             for (LocalCachedMapDisabledKey key : multimap.readAllKeySet()) {
-                Set<CacheKey> keysToDisable = new HashSet<CacheKey>();
+                Set<CacheKey> keysToDisable = new HashSet<>();
                 for (String hash : multimap.getAll(key)) {
                     CacheKey cacheKey = new CacheKey(ByteBufUtil.decodeHexDump(hash));
                     keysToDisable.add(cacheKey);
                 }
-                
+
                 disableKeys(key.getRequestId(), keysToDisable, key.getTimeout());
             }
         }
     }
     
-    public RFuture<Void> clearLocalCacheAsync() {
-        RPromise<Void> result = new RedissonPromise<Void>();
-        byte[] id = generateId();
-        RFuture<Long> future = invalidationTopic.publishAsync(new LocalCachedMapClear(id, true));
-        future.onComplete((res, e) -> {
-            if (e != null) {
-                result.tryFailure(e);
-                return;
+    void createTopic(String name, CommandAsyncExecutor commandExecutor) {
+        if (isSharded) {
+            invalidationTopic = RedissonShardedTopic.createRaw(LocalCachedMessageCodec.INSTANCE, commandExecutor, getInvalidationTopicName());
+            if (options.isUseTopicPattern()) {
+                patternTopic = new RedissonPatternTopic(LocalCachedMessageCodec.INSTANCE, commandExecutor, "*:topic");
             }
-
-            RSemaphore semaphore = getClearSemaphore(id);
-            semaphore.tryAcquireAsync(res.intValue(), 50, TimeUnit.SECONDS).onComplete((r, ex) -> {
-                if (ex != null) {
-                    result.tryFailure(ex);
-                    return;
+        } else if (options.isUseTopicPattern()) {
+            patternTopic = new RedissonPatternTopic(LocalCachedMessageCodec.INSTANCE, commandExecutor, "*:topic");
+        } else {
+            invalidationTopic = RedissonTopic.createRaw(LocalCachedMessageCodec.INSTANCE, commandExecutor, getInvalidationTopicName());
+        }
+    }
+    
+    void addMessageListener() {
+        if (patternTopic != null) {
+            syncListenerIds.put(patternTopic, patternTopic.addListener(Object.class,
+                    (pattern, channel, msg) -> {
+                        if (!getInvalidationTopicName().equals(channel.toString())) {
+                            return;
+                        }
+                        LocalCacheListener.this.onMessage(msg);
+                    }));
+        }
+        if (invalidationTopic != null) {
+            syncListenerIds.put(invalidationTopic, invalidationTopic.addListener(Object.class,
+                    (channel, msg) -> LocalCacheListener.this.onMessage(msg)));
+        }
+    }
+    
+    void addReconnectionListener() {
+        if (patternTopic != null) {
+            reconnectionListenerIds.put(patternTopic, patternTopic.addListener(new PatternStatusListener() {
+                @Override
+                public void onPSubscribe(String pattern) {
+                    LocalCacheListener.this.onSubscribe();
                 }
                 
-                semaphore.deleteAsync().onComplete((re, exc) -> {
-                    if (exc != null) {
-                        result.tryFailure(exc);
-                        return;
-                    }
-
-                    result.trySuccess(null);
-                });
-            });
-        });
-        
-        return result;
+                @Override
+                public void onPUnsubscribe(String pattern) {
+                    // skip
+                }
+            }));
+        }
+        if (invalidationTopic != null) {
+            reconnectionListenerIds.put(invalidationTopic, invalidationTopic.addListener(new BaseStatusListener() {
+                @Override
+                public void onSubscribe(String channel) {
+                    LocalCacheListener.this.onSubscribe();
+                }
+            }));
+        }
     }
 
-    public RTopic getInvalidationTopic() {
-        return invalidationTopic;
+    final void onMessage(Object msg) {
+        if (msg instanceof LocalCachedMapDisable) {
+            LocalCachedMapDisable m = (LocalCachedMapDisable) msg;
+            String requestId = m.getRequestId();
+            Set<CacheKey> keysToDisable = new HashSet<>();
+            for (byte[] keyHash : ((LocalCachedMapDisable) msg).getKeyHashes()) {
+                CacheKey key = new CacheKey(keyHash);
+                keysToDisable.add(key);
+            }
+
+            disableKeys(requestId, keysToDisable, m.getTimeout());
+            if (m.isDisableCache()) {
+                disableCache(requestId, m.getTimeout());
+            }
+
+            RedissonTopic topic = RedissonTopic.createRaw(LocalCachedMessageCodec.INSTANCE,
+                    commandExecutor, RedissonObject.suffixName(name, requestId + DISABLED_ACK_SUFFIX));
+            topic.publishAsync(new LocalCachedMapDisableAck());
+        }
+
+        if (msg instanceof LocalCachedMapEnable) {
+            LocalCachedMapEnable m = (LocalCachedMapEnable) msg;
+            for (byte[] keyHash : m.getKeyHashes()) {
+                CacheKey key = new CacheKey(keyHash);
+                disabledKeys.compute(key, (k, v) -> {
+                    if (v == null) {
+                        return null;
+                    }
+                    v.remove(m.getRequestId());
+                    if (v.isEmpty()) {
+                        return null;
+                    }
+                    return v;
+                });
+            }
+
+            if (m.isEnableCache()) {
+                cacheDisabled.remove(m.getRequestId());
+            }
+        }
+
+        if (msg instanceof LocalCachedMapClear) {
+            LocalCachedMapClear clearMsg = (LocalCachedMapClear) msg;
+            if (!Arrays.equals(clearMsg.getExcludedId(), instanceId)) {
+                cache.clear();
+                if (options.isUseObjectAsCacheKey()) {
+                    cacheKeyMap.clear();
+                }
+                if (clearMsg.isReleaseSemaphore()) {
+                    RSemaphore semaphore = getClearSemaphore(clearMsg.getRequestId());
+                    semaphore.releaseIfExistsAsync(1);
+                }
+            }
+        }
+
+        if (msg instanceof LocalCachedMapInvalidate) {
+            LocalCachedMapInvalidate invalidateMsg = (LocalCachedMapInvalidate) msg;
+            if (!Arrays.equals(invalidateMsg.getExcludedId(), instanceId)) {
+                for (byte[] keyHash : invalidateMsg.getKeyHashes()) {
+                    CacheKey key = new CacheKey(keyHash);
+                    CacheValue value = cache.remove(key);
+                    if (value == null) {
+                        continue;
+                    }
+                    if (options.isUseObjectAsCacheKey()) {
+                        cacheKeyMap.remove(value.getKey());
+                    }
+                    notifyInvalidate(value);
+                }
+            }
+        }
+
+        if (msg instanceof LocalCachedMapUpdate) {
+            LocalCachedMapUpdate updateMsg = (LocalCachedMapUpdate) msg;
+
+            if (!Arrays.equals(updateMsg.getExcludedId(), instanceId)) {
+                for (LocalCachedMapUpdate.Entry entry : updateMsg.getEntries()) {
+                    ByteBuf keyBuf = Unpooled.wrappedBuffer(entry.getKey());
+                    ByteBuf valueBuf = Unpooled.wrappedBuffer(entry.getValue());
+                    try {
+                        CacheValue value = updateCache(keyBuf, valueBuf);
+                        notifyUpdate(value);
+                    } catch (IOException e) {
+                        log.error("Can't decode map entry", e);
+                    } finally {
+                        keyBuf.release();
+                        valueBuf.release();
+                    }
+                }
+            }
+        }
+
+        if (options.getReconnectionStrategy() == ReconnectionStrategy.LOAD) {
+            lastInvalidate = System.currentTimeMillis();
+        }
+    }
+
+    final void onSubscribe() {
+        if (options.getReconnectionStrategy() == ReconnectionStrategy.CLEAR) {
+            cache.clear();
+            if (options.isUseObjectAsCacheKey()) {
+                cacheKeyMap.clear();
+            }
+        }
+        if (options.getReconnectionStrategy() == ReconnectionStrategy.LOAD
+                // check if instance has already been used
+                && lastInvalidate > 0) {
+
+            loadAfterReconnection();
+        }
+    }
+
+    public void notifyUpdate(CacheValue value) {
+        for (LocalCacheUpdateListener listener : updateListeners.values()) {
+            listener.onUpdate(value.getKey(), value.getValue());
+        }
+    }
+
+    public void notifyInvalidate(CacheValue value) {
+        for (LocalCacheInvalidateListener listener : invalidateListeners.values()) {
+            listener.onInvalidate(value.getKey(), value.getValue());
+        }
+    }
+
+    public RFuture<Void> clearLocalCacheAsync() {
+        cache.clear();
+        if (options.isUseObjectAsCacheKey()) {
+            cacheKeyMap.clear();
+        }
+        if (syncListenerIds.isEmpty()) {
+            return CompletableFutureWrapper.completedNull();
+        }
+
+        byte[] id = commandExecutor.getServiceManager().generateIdArray();
+        RSemaphore semaphore = getClearSemaphore(id);
+        CompletionStage<Void> f = semaphore.trySetPermitsAsync(0, Duration.ofSeconds(60))
+                .thenCompose(r -> publishAsync(id))
+                .thenCompose(res -> {
+                    if (res == 0) {
+                        return semaphore.deleteAsync()
+                                        .thenApply(r -> null);
+                    }
+
+                    return semaphore.tryAcquireAsync(res.intValue() - 1, 40, TimeUnit.SECONDS)
+                                    .thenCompose(r -> semaphore.deleteAsync()
+                                                               .thenApply(re -> null));
+                });
+        return new CompletableFutureWrapper<>(f);
+    }
+
+    RFuture<Long> publishAsync(byte[] id) {
+        return publishAsync(new LocalCachedMapClear(instanceId, id, true));
+    }
+
+    public RFuture<Long> publishAsync(Object msg) {
+        return invalidationTopic.publishAsync(msg);
+    }
+
+    public String getPublishCommand() {
+        if (isSharded && !options.isUseTopicPattern()) {
+            return RedisCommands.SPUBLISH.getName();
+        }
+        return RedisCommands.PUBLISH.getName();
     }
 
     public String getInvalidationTopicName() {
         return RedissonObject.suffixName(name, TOPIC_SUFFIX);
     }
 
-    protected abstract void updateCache(ByteBuf keyBuf, ByteBuf valueBuf) throws IOException;
-    
+    protected abstract CacheValue updateCache(ByteBuf keyBuf, ByteBuf valueBuf) throws IOException;
+
+    private void disableCache(final String requestId, long timeout) {
+        cacheDisabled.add(requestId);
+
+        cache.clear();
+        if (options.isUseObjectAsCacheKey()) {
+            cacheKeyMap.clear();
+        }
+
+        commandExecutor.getServiceManager().newTimeout(t -> {
+            cacheDisabled.remove(requestId);
+        }, timeout, TimeUnit.MILLISECONDS);
+    }
+
     private void disableKeys(final String requestId, final Set<CacheKey> keys, long timeout) {
         for (CacheKey key : keys) {
-            disabledKeys.put(key, requestId);
-            cache.remove(key);
-        }
-        
-        commandExecutor.getConnectionManager().getGroup().schedule(new Runnable() {
-            @Override
-            public void run() {
-                for (CacheKey cacheKey : keys) {
-                    disabledKeys.remove(cacheKey, requestId);
+            disabledKeys.compute(key, (k, v) -> {
+                if (v == null) {
+                    v = new HashSet<>();
                 }
+                v.add(requestId);
+                return v;
+            });
+            CacheValue cacheValue = cache.remove(key);
+            if (options.isUseObjectAsCacheKey() && cacheValue != null) {
+                cacheKeyMap.remove(cacheValue.getValue());
+            }
+        }
+
+        commandExecutor.getServiceManager().newTimeout(t -> {
+            for (CacheKey cacheKey : keys) {
+                disabledKeys.compute(cacheKey, (k, v) -> {
+                    if (v == null) {
+                        return null;
+                    }
+                    v.remove(requestId);
+                    if (v.isEmpty()) {
+                        return null;
+                    }
+                    return v;
+                });
             }
         }, timeout, TimeUnit.MILLISECONDS);
     }
-    
+
     public void remove() {
-        List<Integer> ids = new ArrayList<Integer>(2);
-        if (syncListenerId != 0) {
-            ids.add(syncListenerId);
+        removeAsync();
+
+        if (options.getExpirationEventPolicy() == LocalCachedMapOptions.ExpirationEventPolicy.SUBSCRIBE_WITH_KEYEVENT_PATTERN) {
+            RPatternTopic topic = new RedissonPatternTopic(StringCodec.INSTANCE, commandExecutor, "__keyevent@*:expired");
+            topic.removeListenerAsync(expireListenerId);
+        } else if (options.getExpirationEventPolicy() == LocalCachedMapOptions.ExpirationEventPolicy.SUBSCRIBE_WITH_KEYSPACE_CHANNEL) {
+            RTopic topic = new RedissonTopic(StringCodec.INSTANCE, commandExecutor, keyeventPattern);
+            topic.removeListenerAsync(expireListenerId);
         }
-        if (reconnectionListenerId != 0) {
-            ids.add(reconnectionListenerId);
+    }
+
+    void removeAsync() {
+        List<Integer> ids = getIds(patternTopic);
+        if (!ids.isEmpty()) {
+            patternTopic.removeListenerAsync(ids.toArray(new Integer[0]));
         }
-        invalidationTopic.removeListenerAsync(ids.toArray(new Integer[ids.size()]));
+        ids = getIds(invalidationTopic);
+        if (!ids.isEmpty()) {
+            invalidationTopic.removeListenerAsync(ids.toArray(new Integer[0]));
+        }
+    }
+    
+    private List<Integer> getIds(Object topic) {
+        if (topic == null) {
+            return Collections.emptyList();
+        }
+        List<Integer> ids = new ArrayList<>(2);
+        if (syncListenerIds.containsKey(topic)) {
+            ids.add(syncListenerIds.get(topic));
+        }
+        if (reconnectionListenerIds.containsKey(topic)) {
+            ids.add(reconnectionListenerIds.get(topic));
+        }
+        return ids;
     }
 
     public String getUpdatesLogName() {
@@ -321,41 +476,66 @@ public abstract class LocalCacheListener {
     private void loadAfterReconnection() {
         if (System.currentTimeMillis() - lastInvalidate > cacheUpdateLogTime) {
             cache.clear();
+            if (options.isUseObjectAsCacheKey()) {
+                cacheKeyMap.clear();
+            }
             return;
         }
-        
-        object.isExistsAsync().onComplete((res, e) -> {
+
+        object.isExistsAsync().whenComplete((res, e) -> {
             if (e != null) {
-                log.error("Can't check existance", e);
+                log.error("Can't check existence", e);
                 return;
             }
 
-            if (!res) {                                        
+            if (!res) {
                 cache.clear();
+                if (options.isUseObjectAsCacheKey()) {
+                    cacheKeyMap.clear();
+                }
                 return;
             }
-            
-            RScoredSortedSet<byte[]> logs = new RedissonScoredSortedSet<byte[]>(ByteArrayCodec.INSTANCE, commandExecutor, getUpdatesLogName(), null);
+
+            RScoredSortedSet<byte[]> logs = new RedissonScoredSortedSet<>(ByteArrayCodec.INSTANCE, commandExecutor, getUpdatesLogName(), null);
             logs.valueRangeAsync(lastInvalidate, true, Double.POSITIVE_INFINITY, true)
-            .onComplete((r, ex) -> {
-                if (ex != null) {
-                    log.error("Can't load update log", ex);
-                    return;
-                }
-                
-                for (byte[] entry : r) {
-                    byte[] keyHash = Arrays.copyOf(entry, 16);
-                    CacheKey key = new CacheKey(keyHash);
-                    cache.remove(key);
-                }
-            });
+                    .whenComplete((r, ex) -> {
+                        if (ex != null) {
+                            log.error("Can't load update log", ex);
+                            return;
+                        }
+
+                        for (byte[] entry : r) {
+                            byte[] keyHash = Arrays.copyOf(entry, 16);
+                            CacheKey key = new CacheKey(keyHash);
+                            CacheValue cacheValue = cache.remove(key);
+                            if (options.isUseObjectAsCacheKey() && cacheValue != null) {
+                                cacheKeyMap.remove(cacheValue.getValue());
+                            }
+                        }
+                    });
         });
     }
 
     private RSemaphore getClearSemaphore(byte[] requestId) {
         String id = ByteBufUtil.hexDump(requestId);
-        RSemaphore semaphore = new RedissonSemaphore(commandExecutor, name + ":clear:" + id);
-        return semaphore;
+        return new RedissonSemaphore(commandExecutor, name + ":clear:" + id);
+    }
+
+    public <K, V> int addListener(LocalCacheInvalidateListener<K, V> listener) {
+        int listenerId = System.identityHashCode(listener);
+        invalidateListeners.put(listenerId, listener);
+        return listenerId;
+    }
+
+    public <K, V> int addListener(LocalCacheUpdateListener<K, V> listener) {
+        int listenerId = System.identityHashCode(listener);
+        updateListeners.put(listenerId, listener);
+        return listenerId;
+    }
+
+    public void removeListener(int listenerId) {
+        updateListeners.remove(listenerId);
+        invalidateListeners.remove(listenerId);
     }
 
 }

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,14 +15,18 @@
  */
 package org.redisson.api;
 
+import org.redisson.api.RScoredSortedSet.Aggregate;
+import org.redisson.api.scoredsortedset.ScoredSortedSetMoveArgs;
+import org.redisson.api.scoredsortedset.ScoredSortedSetMoveEndArgs;
+import org.redisson.client.protocol.RankedEntry;
+import org.redisson.client.protocol.ScoredEntry;
+
+import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-
-import org.redisson.api.RScoredSortedSet.Aggregate;
-import org.redisson.client.protocol.ScoredEntry;
 
 /**
  * 
@@ -39,7 +43,7 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * <p>
      * Requires <b>Redis 5.0.0 and higher.</b>
      * 
-     * @param queueNames - names of queue
+     * @param queueNames name of queues
      * @param timeout how long to wait before giving up, in units of
      *        {@code unit}
      * @param unit a {@code TimeUnit} determining how to interpret the
@@ -47,7 +51,59 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @return the tail element, or {@code null} if all sorted sets are empty 
      */
     RFuture<V> pollLastFromAnyAsync(long timeout, TimeUnit unit, String... queueNames);
-    
+
+    /**
+     * Removes and returns first available tail elements of <b>any</b> sorted set,
+     * waiting up to the specified wait time if necessary for elements to become available
+     * in any of defined sorted sets <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the tail elements
+     */
+    RFuture<List<V>> pollLastFromAnyAsync(Duration duration, int count, String... queueNames);
+
+    /**
+     * Removes and returns first available tail elements
+     * of <b>any</b> sorted set <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the tail elements
+     */
+    RFuture<List<V>> pollLastFromAnyAsync(int count, String... queueNames);
+
+    /**
+     * Removes and returns first available tail entries
+     * of <b>any</b> sorted set <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param count entries amount
+     * @param queueNames name of queues
+     * @return the head entries
+     */
+    RFuture<Map<String, Map<V, Double>>> pollLastEntriesFromAnyAsync(int count, String... queueNames);
+
+    /**
+     * Removes and returns first available tail entries of <b>any</b> sorted set,
+     * waiting up to the specified wait time if necessary for elements to become available
+     * in any of defined sorted sets <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count entries amount
+     * @param queueNames name of queues
+     * @return the tail entries
+     */
+    RFuture<Map<String, Map<V, Double>>> pollLastEntriesFromAnyAsync(Duration duration, int count, String... queueNames);
+
     /**
      * Removes and returns first available head element of <b>any</b> sorted set,
      * waiting up to the specified wait time if necessary for an element to become available
@@ -55,7 +111,7 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * <p>
      * Requires <b>Redis 5.0.0 and higher.</b>
      * 
-     * @param queueNames - names of queue
+     * @param queueNames name of queues
      * @param timeout how long to wait before giving up, in units of
      *        {@code unit}
      * @param unit a {@code TimeUnit} determining how to interpret the
@@ -64,7 +120,59 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      *  
      */
     RFuture<V> pollFirstFromAnyAsync(long timeout, TimeUnit unit, String... queueNames);
-    
+
+    /**
+     * Removes and returns first available head elements of <b>any</b> sorted set,
+     * waiting up to the specified wait time if necessary for elements to become available
+     * in any of defined sorted sets <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the head elements
+     */
+    RFuture<List<V>> pollFirstFromAnyAsync(Duration duration, int count, String... queueNames);
+
+    /**
+     * Removes and returns first available head elements
+     * of <b>any</b> sorted set <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the head elements
+     */
+    RFuture<List<V>> pollFirstFromAnyAsync(int count, String... queueNames);
+
+    /**
+     * Removes and returns first available head elements
+     * of <b>any</b> sorted set <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the head elements
+     */
+    RFuture<Map<String, Map<V, Double>>> pollFirstEntriesFromAnyAsync(int count, String... queueNames);
+
+    /**
+     * Removes and returns first available head elements of <b>any</b> sorted set,
+     * waiting up to the specified wait time if necessary for elements to become available
+     * in any of defined sorted sets <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the head elements
+     */
+    RFuture<Map<String, Map<V, Double>>> pollFirstEntriesFromAnyAsync(Duration duration, int count, String... queueNames);
+
     /**
      * Removes and returns the head element or {@code null} if this sorted set is empty.
      * <p>
@@ -77,7 +185,30 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @return the head element, 
      *         or {@code null} if this sorted set is empty
      */
+    @Deprecated
     RFuture<V> pollFirstAsync(long timeout, TimeUnit unit);
+
+    /**
+     * Removes and returns the head element or {@code null} if this sorted set is empty.
+     * <p>
+     * Requires <b>Redis 5.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @return the head element,
+     *         or {@code null} if this sorted set is empty
+     */
+    RFuture<V> pollFirstAsync(Duration duration);
+
+    /**
+     * Removes and returns the head elements.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count elements amount
+     * @return the head elements
+     */
+    RFuture<List<V>> pollFirstAsync(Duration duration, int count);
 
     /**
      * Removes and returns the head element waiting if necessary for an element to become available.
@@ -104,8 +235,31 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      *        {@code timeout} parameter
      * @return the tail element or {@code null} if this sorted set is empty
      */
+    @Deprecated
     RFuture<V> pollLastAsync(long timeout, TimeUnit unit);
-    
+
+    /**
+     * Removes and returns the tail elements.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count elements amount
+     * @return the tail elements
+     */
+    RFuture<List<V>> pollLastAsync(Duration duration, int count);
+
+    /**
+     * Removes and returns the tail element or {@code null} if this sorted set is empty.
+     * <p>
+     * Requires <b>Redis 5.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @return the tail element,
+     *         or {@code null} if this sorted set is empty
+     */
+    RFuture<V> pollLastAsync(Duration duration);
+
     /**
      * Removes and returns the head elements of this sorted set.
      *
@@ -131,11 +285,109 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
     RFuture<V> pollFirstAsync();
 
     /**
+     * Removes and returns the head entry (value and its score) or {@code null} if this sorted set is empty.
+     *
+     * @return the head entry,
+     *         or {@code null} if this sorted set is empty
+     */
+    RFuture<ScoredEntry<V>> pollFirstEntryAsync();
+
+    /**
+     * Removes and returns the head entries (value and its score) of this sorted set.
+     *
+     * @param count entries amount
+     * @return the head entries of this sorted set
+     */
+    RFuture<List<ScoredEntry<V>>> pollFirstEntriesAsync(int count);
+
+    /**
+     * Removes and returns the head entries (value and its score).
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count entries amount
+     * @return the head entries
+     */
+    RFuture<List<ScoredEntry<V>>> pollFirstEntriesAsync(Duration duration, int count);
+
+    /**
      * Removes and returns the tail element or {@code null} if this sorted set is empty.
      *
      * @return the tail element or {@code null} if this sorted set is empty
      */
     RFuture<V> pollLastAsync();
+
+    /**
+     * Removes and returns the tail entry (value and its score) or {@code null} if this sorted set is empty.
+     *
+     * @return the tail entry or {@code null} if this sorted set is empty
+     */
+    RFuture<ScoredEntry<V>> pollLastEntryAsync();
+
+    /**
+     * Removes and returns the tail entries (value and its score) of this sorted set.
+     *
+     * @param count entries amount
+     * @return the tail entries of this sorted set
+     */
+    RFuture<List<ScoredEntry<V>>> pollLastEntriesAsync(int count);
+
+    /**
+     * Removes and returns the head entries (value and its score).
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count entries amount
+     * @return the tail entries
+     */
+    RFuture<List<ScoredEntry<V>>> pollLastEntriesAsync(Duration duration, int count);
+
+    /**
+     * Removes the selected entries from this sorted set and adds them,
+     * with their scores, to the destination sorted set as a single atomic operation.
+     * Entries are selected from the lowest or the highest scored end, by score range or by value.
+     * <p>
+     * A value the destination already holds gets the score it had in this sorted set.
+     * The destination is created if needed, and this sorted set is deleted once its last entry is moved.
+     * In Redis Cluster both names must map to the same hash slot.
+     * <p>
+     * Uses {@code ZMOVE} command, or {@code ZMOVEMEMBER} command for values.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param args arguments object
+     * @return moved entries in selection order,
+     *         or an empty list if nothing was moved
+     */
+    RFuture<List<ScoredEntry<V>>> moveAsync(ScoredSortedSetMoveArgs args);
+
+    /**
+     * Removes the lowest or the highest scored entries from this sorted set and adds them,
+     * with their scores, to the destination sorted set as a single atomic operation.
+     * If this sorted set is empty, waits up to the defined <code>timeout</code>
+     * for an entry to become available.
+     * <p>
+     * Once an entry is available, up to the defined count of entries is moved
+     * without waiting for a full batch. Only this sorted set is waited on:
+     * a change of the destination doesn't end the wait.
+     * <p>
+     * The timeout is rounded down to whole seconds, a timeout under one second waits
+     * one second, and a zero timeout waits indefinitely. Inside a transaction,
+     * such as an atomic {@link RBatch}, it doesn't wait.
+     * <p>
+     * Uses {@code BZMOVE} command.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param timeout how long to wait before giving up
+     * @param args arguments object, defined by {@code first()} or {@code last()}
+     * @return moved entries in selection order,
+     *         or an empty list if the timeout elapsed
+     * @throws IllegalArgumentException if timeout is negative
+     */
+    RFuture<List<ScoredEntry<V>>> moveAsync(Duration timeout, ScoredSortedSetMoveEndArgs args);
 
     /**
      * Returns the head element or {@code null} if this sorted set is empty.
@@ -145,11 +397,25 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
     RFuture<V> firstAsync();
 
     /**
+     * Returns the head entry (value and its score) or {@code null} if this sorted set is empty.
+     *
+     * @return the head entry or {@code null} if this sorted set is empty
+     */
+    RFuture<ScoredEntry<V>> firstEntryAsync();
+
+    /**
      * Returns the tail element or {@code null} if this sorted set is empty.
      *
      * @return the tail element or {@code null} if this sorted set is empty
      */
     RFuture<V> lastAsync();
+
+    /**
+     * Returns the tail entry (value and its score) or {@code null} if this sorted set is empty.
+     *
+     * @return the tail entry or {@code null} if this sorted set is empty
+     */
+    RFuture<ScoredEntry<V>> lastEntryAsync();
 
     /**
      * Returns score of the head element or returns {@code null} if this sorted set is empty.
@@ -205,6 +471,46 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
     RFuture<Integer> addAllAsync(Map<V, Double> objects);
 
     /**
+     * Adds elements to this set only if they haven't been added before.
+     * <p>
+     * Requires <b>Redis 3.0.2 and higher.</b>
+     *
+     * @param objects map of elements to add
+     * @return amount of added elements
+     */
+    RFuture<Integer> addAllIfAbsentAsync(Map<V, Double> objects);
+
+    /**
+     * Adds elements to this set only if they already exist.
+     * <p>
+     * Requires <b>Redis 3.0.2 and higher.</b>
+     *
+     * @param objects map of elements to add
+     * @return amount of added elements
+     */
+    RFuture<Integer> addAllIfExistAsync(Map<V, Double> objects);
+
+    /**
+     * Adds elements to this set only if new scores greater than current score of existed elements.
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param objects map of elements to add
+     * @return amount of added elements
+     */
+    RFuture<Integer> addAllIfGreaterAsync(Map<V, Double> objects);
+
+    /**
+     * Adds elements to this set only if new scores less than current score of existed elements.
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param objects map of elements to add
+     * @return amount of added elements
+     */
+    RFuture<Integer> addAllIfLessAsync(Map<V, Double> objects);
+
+    /**
      * Removes values by score range.
      * 
      * @param startScore - start score. 
@@ -237,7 +543,16 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @return rank or <code>null</code> if value does not exist
      */
     RFuture<Integer> rankAsync(V o);
-    
+
+    /**
+     * Returns rank and score of specified <code>value</code>,
+     * with the ranks ordered from low to high.
+     *
+     * @param value object
+     * @return ranked entry or <code>null</code> if value does not exist
+     */
+    RFuture<RankedEntry<V>> rankEntryAsync(V value);
+
     /**
      * Returns rank of value, with the scores ordered from high to low.
      * 
@@ -245,6 +560,15 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @return rank or <code>null</code> if value does not exist
      */
     RFuture<Integer> revRankAsync(V o);
+
+    /**
+     * Returns rank and score of specified <code>value</code>,
+     * with the ranks ordered from high to low.
+     *
+     * @param value object
+     * @return ranked entry or <code>null</code> if value does not exist
+     */
+    RFuture<RankedEntry<V>> revRankEntryAsync(V value);
 
     /**
      * Returns ranks of elements, with the scores ordered from high to low.
@@ -306,15 +630,25 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
     RFuture<List<Integer>> addAndGetRevRankAsync(Map<? extends V, Double> map);
 
     /**
+     * Use {@link #addIfAbsentAsync(double, Object)} instead
+     *
+     * @param score - object score
+     * @param object - object itself
+     * @return <code>true</code> if element has added and <code>false</code> if not.
+     */
+    @Deprecated
+    RFuture<Boolean> tryAddAsync(double score, V object);
+
+    /**
      * Adds element to this set only if has not been added before.
      * <p>
      * Requires <b>Redis 3.0.2 and higher.</b>
      *
      * @param score - object score
      * @param object - object itself
-     * @return <code>true</code> if element has added and <code>false</code> if not.
+     * @return <code>true</code> if element added and <code>false</code> if not.
      */
-    RFuture<Boolean> tryAddAsync(double score, V object);
+    RFuture<Boolean> addIfAbsentAsync(double score, V object);
 
     /**
      * Adds element to this set only if it's already exists.
@@ -357,6 +691,16 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @return <code>true</code> if an element was removed as a result of this call
      */
     RFuture<Boolean> removeAsync(V o);
+
+    /**
+     * Replaces a previous <code>oldObject</code> with a <code>newObject</code>.
+     * Returns <code>false</code> if previous object doesn't exist.
+     *
+     * @param oldObject old object
+     * @param newObject new object
+     * @return <code>true</code> if object has been replaced otherwise <code>false</code>.
+     */
+    RFuture<Boolean> replaceAsync(V oldObject, V newObject);
 
     /**
      * Returns size of this set.
@@ -723,15 +1067,20 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
     RFuture<Collection<V>> readAllAsync();
 
     /**
+     * Use {@link #intersectionAsync(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets 
      * and store result to current ScoredSortedSet
      * 
      * @param names - names of ScoredSortedSet
      * @return length of intersection
      */
+    @Deprecated
     RFuture<Integer> intersectionAsync(String... names);
 
     /**
+     * Use {@link #intersectionAsync(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets with defined aggregation method 
      * and store result to current ScoredSortedSet
      * 
@@ -739,18 +1088,24 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param names - names of ScoredSortedSet
      * @return length of intersection
      */
+    @Deprecated
     RFuture<Integer> intersectionAsync(Aggregate aggregate, String... names);
 
     /**
+     * Use {@link #intersectionAsync(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets mapped to weight multiplier 
      * and store result to current ScoredSortedSet
      * 
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return length of intersection
      */
+    @Deprecated
     RFuture<Integer> intersectionAsync(Map<String, Double> nameWithWeight);
 
     /**
+     * Use {@link #intersectionAsync(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets mapped to weight multiplier 
      * with defined aggregation method 
      * and store result to current ScoredSortedSet
@@ -759,9 +1114,22 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return length of intersection
      */
+    @Deprecated
     RFuture<Integer> intersectionAsync(Aggregate aggregate, Map<String, Double> nameWithWeight);
-
+    
     /**
+     * Intersect provided ScoredSortedSets mapped to weight multiplier
+     * with defined aggregation method
+     * and store result to current ScoredSortedSet
+     *
+     * @param args object
+     * @return length of intersection
+     */
+    RFuture<Integer> intersectionAsync(SetIntersectionArgs args);
+    
+    /**
+     * Use {@link #readIntersectionAsync(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets
      * with current ScoredSortedSet without state change
      * <p>
@@ -770,9 +1138,12 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param names - names of ScoredSortedSet
      * @return result of intersection
      */
+    @Deprecated
     RFuture<Collection<V>> readIntersectionAsync(String... names);
 
     /**
+     * Use {@link #readIntersectionAsync(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets with current ScoredSortedSet using defined aggregation method
      * without state change
      * <p>
@@ -782,9 +1153,12 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param names - names of ScoredSortedSet
      * @return result of intersection
      */
+    @Deprecated
     RFuture<Collection<V>> readIntersectionAsync(Aggregate aggregate, String... names);
 
     /**
+     * Use {@link #readIntersectionAsync(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets mapped to weight multiplier
      * with current ScoredSortedSet without state change
      * <p>
@@ -793,9 +1167,12 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return result of intersection
      */
+    @Deprecated
     RFuture<Collection<V>> readIntersectionAsync(Map<String, Double> nameWithWeight);
 
     /**
+     * Use {@link #readIntersectionAsync(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets mapped to weight multiplier
      * with current ScoredSortedSet using defined aggregation method
      * without state change
@@ -806,18 +1183,67 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return result of intersection
      */
+    @Deprecated
     RFuture<Collection<V>> readIntersectionAsync(Aggregate aggregate, Map<String, Double> nameWithWeight);
 
     /**
+     * Intersect provided ScoredSortedSets
+     * with current ScoredSortedSet
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param args object
+     * @return result of intersection
+     */
+    RFuture<Collection<V>> readIntersectionAsync(SetIntersectionArgs args);
+
+    /**
+     * Intersect provided ScoredSortedSets
+     * with current ScoredSortedSet
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param args object
+     * @return result of intersection entries (value and its score)
+     */
+    RFuture<Collection<ScoredEntry<V>>> readIntersectionEntriesAsync(SetIntersectionArgs args);
+
+    /**
+     * Counts elements of set as a result of sets intersection with current set.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return amount of elements
+     */
+    RFuture<Integer> countIntersectionAsync(String... names);
+
+    /**
+     * Counts elements of set as a result of sets intersection with current set.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @param limit - sets intersection limit
+     * @return amount of elements
+     */
+    RFuture<Integer> countIntersectionAsync(int limit, String... names);
+
+    /**
+     * Use {@link #unionAsync(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets 
      * and store result to current ScoredSortedSet
      * 
      * @param names - names of ScoredSortedSet
      * @return length of union
      */
+    @Deprecated
     RFuture<Integer> unionAsync(String... names);
 
     /**
+     * Use {@link #unionAsync(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets with defined aggregation method 
      * and store result to current ScoredSortedSet
      * 
@@ -825,18 +1251,24 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param names - names of ScoredSortedSet
      * @return length of union
      */
+    @Deprecated
     RFuture<Integer> unionAsync(Aggregate aggregate, String... names);
 
     /**
+     * Use {@link #unionAsync(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets mapped to weight multiplier 
      * and store result to current ScoredSortedSet
      * 
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return length of union
      */
+    @Deprecated
     RFuture<Integer> unionAsync(Map<String, Double> nameWithWeight);
 
     /**
+     * Use {@link #unionAsync(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets mapped to weight multiplier 
      * with defined aggregation method 
      * and store result to current ScoredSortedSet
@@ -845,9 +1277,22 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return length of union
      */
+    @Deprecated
     RFuture<Integer> unionAsync(Aggregate aggregate, Map<String, Double> nameWithWeight);
-
+    
     /**
+     * Union provided ScoredSortedSets mapped to weight multiplier
+     * with defined aggregation method
+     * and store result to current ScoredSortedSet
+     *
+     * @param args object
+     * @return length of union
+     */
+    RFuture<Integer> unionAsync(SetUnionArgs args);
+    
+    /**
+     * Use {@link #readUnionAsync(SetUnionArgs)} instead.
+     * <p>
      * Union ScoredSortedSets specified by name with current ScoredSortedSet
      * without state change.
      * <p>
@@ -856,9 +1301,12 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param names - names of ScoredSortedSet
      * @return result of union
      */
+    @Deprecated
     RFuture<Collection<V>> readUnionAsync(String... names);
 
     /**
+     * Use {@link #readUnionAsync(SetUnionArgs)} instead.
+     * <p>
      * Union ScoredSortedSets specified by name with defined aggregation method
      * and current ScoredSortedSet without state change.
      * <p>
@@ -868,9 +1316,12 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param names - names of ScoredSortedSet
      * @return result of union
      */
+    @Deprecated
     RFuture<Collection<V>> readUnionAsync(Aggregate aggregate, String... names);
 
     /**
+     * Use {@link #readUnionAsync(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets mapped to weight multiplier
      * and current ScoredSortedSet without state change.
      * <p>
@@ -879,9 +1330,12 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return result of union
      */
+    @Deprecated
     RFuture<Collection<V>> readUnionAsync(Map<String, Double> nameWithWeight);
 
     /**
+     * Use {@link #readUnionAsync(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets mapped to weight multiplier
      * with defined aggregation method
      * and current ScoredSortedSet without state change
@@ -892,7 +1346,32 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return result of union
      */
+    @Deprecated
     RFuture<Collection<V>> readUnionAsync(Aggregate aggregate, Map<String, Double> nameWithWeight);
+
+    /**
+     * Union provided ScoredSortedSets mapped to weight multiplier
+     * with defined aggregation method
+     * and current ScoredSortedSet without state change
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param args object
+     * @return result of union
+     */
+    RFuture<Collection<V>> readUnionAsync(SetUnionArgs args);
+
+    /**
+     * Union provided ScoredSortedSets mapped to weight multiplier
+     * with defined aggregation method
+     * and current ScoredSortedSet without state change
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param args object
+     * @return result of union entries (value and its score)
+     */
+    RFuture<Collection<ScoredEntry<V>>> readUnionEntriesAsync(SetUnionArgs args);
 
     /**
      * Diff ScoredSortedSets specified by name
@@ -906,6 +1385,17 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
     RFuture<Collection<V>> readDiffAsync(String... names);
 
     /**
+     * Diff ScoredSortedSets specified by name
+     * with current ScoredSortedSet without state change.
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return result of diff entries (value and its score)
+     */
+    RFuture<Collection<ScoredEntry<V>>> readDiffEntriesAsync(String... names);
+
+    /**
      * Diff provided ScoredSortedSets
      * and store result to current ScoredSortedSet
      * <p>
@@ -915,5 +1405,20 @@ public interface RScoredSortedSetAsync<V> extends RExpirableAsync, RSortableAsyn
      * @return length of diff
      */
     RFuture<Integer> diffAsync(String... names);
+
+    /**
+     * Adds object event listener
+     *
+     * @see org.redisson.api.listener.TrackingListener
+     * @see org.redisson.api.listener.ScoredSortedSetAddListener
+     * @see org.redisson.api.listener.ScoredSortedSetRemoveListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
+     *
+     * @param listener object event listener
+     * @return listener id
+     */
+    @Override
+    RFuture<Integer> addListenerAsync(ObjectListener listener);
 
 }

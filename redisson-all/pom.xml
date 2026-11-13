@@ -4,7 +4,7 @@
     <parent>
         <groupId>org.redisson</groupId>
         <artifactId>redisson-parent</artifactId>
-        <version>3.15.5-SNAPSHOT</version>
+        <version>4.8.1-SNAPSHOT</version>
         <relativePath>../</relativePath>
     </parent>
 
@@ -13,8 +13,8 @@
 
     <name>Redisson/All-in-One</name>
 
-    <description>Redis Java client with features of In-Memory Data Grid</description>
-    <inceptionYear>2014</inceptionYear>
+    <description>Valkey and Redis Java client. Real-Time Data Platform. Sync/Async/RxJava3/Reactive API. Client side caching. Over 50 Redis based Java objects and services: JCache API, Apache Tomcat, Hibernate, Spring, Set, Multimap, SortedSet, Map, List, Queue, Deque, Semaphore, Lock, AtomicLong, Map Reduce, Bloom filter, Scheduler, RPC</description>
+    <inceptionYear>2013</inceptionYear>
     <url>https://redisson.org</url>
 
     <organization>
@@ -51,7 +51,7 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-gpg-plugin</artifactId>
-                        <version>1.6</version>
+                        <version>3.2.4</version>
                         <executions>
                             <execution>
                                 <id>sign-artifacts</id>
@@ -89,14 +89,14 @@
             <artifactId>netty-transport-native-kqueue</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.jboss.marshalling</groupId>
-            <artifactId>jboss-marshalling-river</artifactId>
-            <version>2.0.9.Final</version>
-        </dependency>
-        <dependency>
             <groupId>org.xerial.snappy</groupId>
             <artifactId>snappy-java</artifactId>
-            <version>1.1.7.2</version>
+            <version>1.1.10.12</version>
+        </dependency>
+        <dependency>
+            <groupId>at.yawk.lz4</groupId>
+            <artifactId>lz4-java</artifactId>
+            <version>1.11.4</version>
         </dependency>
     </dependencies>
 
@@ -105,7 +105,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
-                <version>3.1.0</version>
+                <version>3.4.1</version>
                 <configuration>
                     <archive>
                         <index>true</index>
@@ -139,7 +139,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
-                <version>3.2.1</version>
+                <version>3.6.2</version>
                 <executions>
                     <execution>
                         <id>shade-artifacts</id>

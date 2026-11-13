@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,27 +15,28 @@
  */
 package org.redisson.client;
 
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-
-import org.redisson.RedissonShutdownException;
-import org.redisson.api.RFuture;
-import org.redisson.client.codec.Codec;
-import org.redisson.client.handler.CommandsQueue;
-import org.redisson.client.protocol.CommandData;
-import org.redisson.client.protocol.CommandsData;
-import org.redisson.client.protocol.QueueCommand;
-import org.redisson.client.protocol.RedisCommand;
-import org.redisson.client.protocol.RedisCommands;
-import org.redisson.misc.LogHelper;
-import org.redisson.misc.RPromise;
-import org.redisson.misc.RedissonPromise;
-
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.util.AttributeKey;
 import io.netty.util.Timeout;
+import org.redisson.RedissonShutdownException;
+import org.redisson.api.RFuture;
+import org.redisson.client.codec.Codec;
+import org.redisson.client.handler.CommandsQueue;
+import org.redisson.client.handler.CommandsQueuePubSub;
+import org.redisson.client.protocol.*;
+import org.redisson.config.DelayStrategy;
+import org.redisson.misc.CompletableFutureWrapper;
+import org.redisson.misc.LogHelper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
+import java.util.Deque;
+import java.util.Queue;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 
@@ -44,25 +45,34 @@ import io.netty.util.Timeout;
  */
 public class RedisConnection implements RedisCommands {
 
+    public enum Status {OPEN, CLOSED, CLOSED_IDLE}
+
+    private static final Logger LOG = LoggerFactory.getLogger(RedisConnection.class);
     private static final AttributeKey<RedisConnection> CONNECTION = AttributeKey.valueOf("connection");
 
     final RedisClient redisClient;
 
-    private volatile RPromise<Void> fastReconnect;
-    private volatile boolean closed;
+    private volatile CompletableFuture<Void> fastReconnect;
+    private volatile Status status = Status.OPEN;
     volatile Channel channel;
 
-    private RPromise<?> connectionPromise;
-    private long lastUsageTime;
+    private CompletableFuture<?> connectionPromise;
+    private volatile long lastUsageTime;
+    @Deprecated
     private Runnable connectedListener;
+    @Deprecated
     private Runnable disconnectedListener;
 
-    public <C> RedisConnection(RedisClient redisClient, Channel channel, RPromise<C> connectionPromise) {
+    private final AtomicInteger usage = new AtomicInteger();
+
+    public <C> RedisConnection(RedisClient redisClient, Channel channel, CompletableFuture<C> connectionPromise) {
         this.redisClient = redisClient;
         this.connectionPromise = connectionPromise;
 
         updateChannel(channel);
         lastUsageTime = System.nanoTime();
+
+        LOG.debug("Connection created {}", redisClient);
     }
     
     protected RedisConnection(RedisClient redisClient) {
@@ -73,8 +83,24 @@ public class RedisConnection implements RedisCommands {
         if (connectedListener != null) {
             connectedListener.run();
         }
+        if (redisClient.getConfig().getConnectedListener() != null) {
+            redisClient.getConfig().getConnectedListener().accept(redisClient.getAddr());
+        }
     }
 
+    public int incUsage() {
+        return usage.incrementAndGet();
+    }
+
+    public int getUsage() {
+        return usage.get();
+    }
+
+    public int decUsage() {
+        return usage.decrementAndGet();
+    }
+
+    @Deprecated
     public void setConnectedListener(Runnable connectedListener) {
         this.connectedListener = connectedListener;
     }
@@ -83,24 +109,67 @@ public class RedisConnection implements RedisCommands {
         if (disconnectedListener != null) {
             disconnectedListener.run();
         }
+        if (redisClient.getConfig().getDisconnectedListener() != null) {
+            redisClient.getConfig().getDisconnectedListener().accept(redisClient.getAddr());
+        }
     }
 
+    @Deprecated
     public void setDisconnectedListener(Runnable disconnectedListener) {
         this.disconnectedListener = disconnectedListener;
     }
 
-    public <C extends RedisConnection> RPromise<C> getConnectionPromise() {
-        return (RPromise<C>) connectionPromise;
+    public <C extends RedisConnection> CompletableFuture<C> getConnectionPromise() {
+        return (CompletableFuture<C>) connectionPromise;
     }
     
     public static <C extends RedisConnection> C getFrom(Channel channel) {
         return (C) channel.attr(RedisConnection.CONNECTION).get();
     }
 
+    public CommandData<?, ?> getLastCommand() {
+        Deque<QueueCommandHolder> queue = channel.attr(CommandsQueue.COMMANDS_QUEUE).get();
+        if (queue != null) {
+            QueueCommandHolder holder = queue.peekLast();
+            if (holder != null) {
+                if (holder.getCommand() instanceof CommandData) {
+                    return (CommandData<?, ?>) holder.getCommand();
+                }
+            }
+        }
+        return null;
+    }
+
+    public QueueCommand getCurrentCommandData() {
+        Queue<QueueCommandHolder> queue = channel.attr(CommandsQueue.COMMANDS_QUEUE).get();
+        if (queue != null) {
+            QueueCommandHolder holder = queue.peek();
+            if (holder != null) {
+                return holder.getCommand();
+            }
+        }
+
+        QueueCommandHolder holder = channel.attr(CommandsQueuePubSub.CURRENT_COMMAND).get();
+        if (holder != null) {
+            return holder.getCommand();
+        }
+        return null;
+    }
+
     public CommandData<?, ?> getCurrentCommand() {
-        QueueCommand command = channel.attr(CommandsQueue.CURRENT_COMMAND).get();
-        if (command instanceof CommandData) {
-            return (CommandData<?, ?>) command;
+        Queue<QueueCommandHolder> queue = channel.attr(CommandsQueue.COMMANDS_QUEUE).get();
+        if (queue != null) {
+            QueueCommandHolder holder = queue.peek();
+            if (holder != null) {
+                if (holder.getCommand() instanceof CommandData) {
+                    return (CommandData<?, ?>) holder.getCommand();
+                }
+            }
+        }
+
+        QueueCommandHolder holder = channel.attr(CommandsQueuePubSub.CURRENT_COMMAND).get();
+        if (holder != null && holder.getCommand() instanceof CommandData) {
+            return (CommandData<?, ?>) holder.getCommand();
         }
         return null;
     }
@@ -127,6 +196,9 @@ public class RedisConnection implements RedisCommands {
     }
 
     public void updateChannel(Channel channel) {
+        if (channel == null) {
+            throw new NullPointerException();
+        }
         this.channel = channel;
         channel.attr(CONNECTION).set(this);
     }
@@ -135,26 +207,18 @@ public class RedisConnection implements RedisCommands {
         return redisClient;
     }
 
-    public <R> R await(RFuture<R> future) {
-        CountDownLatch l = new CountDownLatch(1);
-        future.onComplete((res, e) -> {
-            l.countDown();
-        });
-        
+    public <R> R await(CompletableFuture<R> future) {
         try {
-            if (!l.await(redisClient.getCommandTimeout(), TimeUnit.MILLISECONDS)) {
-                RPromise<R> promise = (RPromise<R>) future;
-                RedisTimeoutException ex = new RedisTimeoutException("Command execution timeout for " + redisClient.getAddr());
-                promise.tryFailure(ex);
-                throw ex;
+            return future.get(redisClient.getCommandTimeout(), TimeUnit.MILLISECONDS);
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof RedisException) {
+                throw (RedisException) e.getCause();
             }
-            if (!future.isSuccess()) {
-                if (future.cause() instanceof RedisException) {
-                    throw (RedisException) future.cause();
-                }
-                throw new RedisException("Unexpected exception while processing command", future.cause());
-            }
-            return future.getNow();
+            throw new RedisException("Unexpected exception while processing command", e.getCause());
+        } catch (TimeoutException e) {
+            RedisTimeoutException ex = new RedisTimeoutException("Command execution timeout for " + redisClient.getAddr());
+            future.completeExceptionally(ex);
+            throw ex;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return null;
@@ -174,7 +238,7 @@ public class RedisConnection implements RedisCommands {
     }
 
     public <T, R> R sync(Codec encoder, RedisCommand<T> command, Object... params) {
-        RPromise<R> promise = new RedissonPromise<R>();
+        CompletableFuture<R> promise = new CompletableFuture<>();
         send(new CommandData<T, R>(promise, encoder, command, params));
         return await(promise);
     }
@@ -187,54 +251,76 @@ public class RedisConnection implements RedisCommands {
         return async(timeout, null, command, params);
     }
 
-    public <T, R> RFuture<R> async(Codec encoder, RedisCommand<T> command, Object... params) {
-        return async(-1, encoder, command, params);
+    public <T, R> RFuture<R> async(Codec codec, RedisCommand<T> command, Object... params) {
+        return async(-1, codec, command, params);
     }
 
-    public <T, R> RFuture<R> async(long timeout, Codec encoder, RedisCommand<T> command, Object... params) {
-        RPromise<R> promise = new RedissonPromise<R>();
+    public <T, R> RFuture<R> async(int retryAttempts, DelayStrategy delayStrategy, long timeout, Codec codec, RedisCommand<T> command, Object... params) {
+        CompletableFuture<R> result = new CompletableFuture<>();
+        AtomicInteger attempts = new AtomicInteger();
+        async(result, retryAttempts, attempts, delayStrategy, timeout, codec, command, params);
+        return new CompletableFutureWrapper<>(result);
+    }
+
+    private <T, R> void async(CompletableFuture<R> promise, int maxAttempts, AtomicInteger attempts, DelayStrategy delayStrategy,
+                              long timeout, Codec codec, RedisCommand<T> command, Object... params) {
+        RFuture<R> f = async(timeout, codec, command, params);
+        f.whenComplete((r, e) -> {
+            if (e != null) {
+                if (attempts.get() < maxAttempts) {
+                    Duration delay = delayStrategy.calcDelay(attempts.get());
+                    attempts.incrementAndGet();
+                    redisClient.getTimer().newTimeout(t -> {
+                        async(promise, maxAttempts, attempts, delayStrategy, timeout, codec, command, params);
+                    }, delay.toMillis(), TimeUnit.MILLISECONDS);
+                    return;
+                }
+
+                promise.completeExceptionally(e);
+                return;
+            }
+
+            promise.complete(r);
+        });
+    }
+
+    public <T, R> RFuture<R> async(long timeout, Codec codec, RedisCommand<T> command, Object... params) {
+        CompletableFuture<R> promise = new CompletableFuture<>();
         if (timeout == -1) {
             timeout = redisClient.getCommandTimeout();
         }
         
-        if (redisClient.getEventLoopGroup().isShuttingDown()) {
-            RedissonShutdownException cause = new RedissonShutdownException("Redisson is shutdown");
-            return RedissonPromise.newFailedFuture(cause);
+        if (redisClient.isShutdown()) {
+            RedissonShutdownException cause = new RedissonShutdownException("Redis client " + redisClient.getAddr() + " is shutdown");
+            return new CompletableFutureWrapper<>(cause);
         }
 
         Timeout scheduledFuture = redisClient.getTimer().newTimeout(t -> {
-            RedisTimeoutException ex = new RedisTimeoutException("Command execution timeout for command: "
+            RedisTimeoutException ex = new RedisTimeoutException("Command execution timeout for "
                     + LogHelper.toString(command, params) + ", Redis client: " + redisClient);
-            promise.tryFailure(ex);
+            promise.completeExceptionally(ex);
         }, timeout, TimeUnit.MILLISECONDS);
         
-        promise.onComplete((res, e) -> {
+        promise.whenComplete((res, e) -> {
             scheduledFuture.cancel();
         });
         
-        ChannelFuture writeFuture = send(new CommandData<T, R>(promise, encoder, command, params));
-        writeFuture.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) throws Exception {
-                if (!future.isSuccess()) {
-                    promise.tryFailure(future.cause());
-                }
+        ChannelFuture writeFuture = send(new CommandData<>(promise, codec, command, params));
+        writeFuture.addListener((ChannelFutureListener) future -> {
+            if (!future.isSuccess()) {
+                promise.completeExceptionally(future.cause());
             }
         });
-        return promise;
+        return new CompletableFutureWrapper<>(promise);
     }
 
     public <T, R> CommandData<T, R> create(Codec encoder, RedisCommand<T> command, Object... params) {
-        RPromise<R> promise = new RedissonPromise<R>();
-        return new CommandData<T, R>(promise, encoder, command, params);
-    }
-
-    private void setClosed(boolean closed) {
-        this.closed = closed;
+        CompletableFuture<R> promise = new CompletableFuture<>();
+        return new CommandData<>(promise, encoder, command, params);
     }
 
     public boolean isClosed() {
-        return closed;
+        return status != Status.OPEN;
     }
 
     public boolean isFastReconnect() {
@@ -242,28 +328,28 @@ public class RedisConnection implements RedisCommands {
     }
     
     public void clearFastReconnect() {
-        fastReconnect.trySuccess(null);
+        fastReconnect.complete(null);
         fastReconnect = null;
     }
-    
-    private void close() {
-        CommandData<?, ?> command = getCurrentCommand();
-        if (!isActive()
-                || (command != null && command.isBlockingCommand())
-                    || !connectionPromise.isDone()) {
-            channel.close();
-        } else {
-            RFuture<Void> f = async(RedisCommands.QUIT);
-            f.onComplete((res, e) -> {
-                channel.close();
-            });
+
+    public void close() {
+        try {
+            closeAsync().sync();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            throw e;
         }
     }
+
+    private void closeInternal() {
+        channel.close();
+    }
     
-    public RFuture<Void> forceFastReconnectAsync() {
-        RedissonPromise<Void> promise = new RedissonPromise<Void>();
+    public CompletionStage<Void> forceFastReconnectAsync() {
+        CompletableFuture<Void> promise = new CompletableFuture<>();
         fastReconnect = promise;
-        close();
+        closeInternal();
         return promise;
     }
 
@@ -277,15 +363,33 @@ public class RedisConnection implements RedisCommands {
         return channel;
     }
 
+    public ChannelFuture closeIdleAsync() {
+        status = Status.CLOSED_IDLE;
+        closeInternal();
+        return channel.closeFuture();
+    }
+
+    public boolean isClosedIdle() {
+        return status == Status.CLOSED_IDLE;
+    }
+
     public ChannelFuture closeAsync() {
-        setClosed(true);
-        close();
+        if (status == Status.CLOSED) {
+            return channel.closeFuture();
+        }
+
+        status = Status.CLOSED;
+        closeInternal();
         return channel.closeFuture();
     }
 
     @Override
     public String toString() {
-        return getClass().getSimpleName() + "@" + System.identityHashCode(this) + " [redisClient=" + redisClient + ", channel=" + channel + ", currentCommand=" + getCurrentCommand() + "]";
+        return getClass().getSimpleName() + "@" + System.identityHashCode(this)
+                        + " [redisClient=" + redisClient
+                        + ", channel=" + channel
+                        + ", currentCommand=" + getCurrentCommandData()
+                        + ", usage=" + usage + "]";
     }
 
 }

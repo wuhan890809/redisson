@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,15 @@
  */
 package org.redisson.reactive;
 
-import java.lang.reflect.Method;
-import java.util.concurrent.Callable;
-
-import org.redisson.api.RFuture;
+import org.redisson.api.annotation.EmptyAsAbsent;
 import org.redisson.misc.ProxyBuilder;
-import org.redisson.misc.ProxyBuilder.Callback;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.util.Collection;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionStage;
 
 /**
  * 
@@ -32,20 +35,21 @@ public class ReactiveProxyBuilder {
     public static <T> T create(CommandReactiveExecutor commandExecutor, Object instance, Class<T> clazz) {
         return create(commandExecutor, instance, null, clazz);
     }
-    
+
     public static <T> T create(CommandReactiveExecutor commandExecutor, Object instance, Object implementation, Class<T> clazz) {
-        return ProxyBuilder.create(new Callback() {
-            @Override
-            public Object execute(Method mm, Object instance, Method instanceMethod, Object[] args) {
-                return commandExecutor.reactive(new Callable<RFuture<Object>>() {
-                    @SuppressWarnings("unchecked")
-                    @Override
-                    public RFuture<Object> call() throws Exception {
-                        return (RFuture<Object>) mm.invoke(instance, args);
-                    }
-                });
+        return ProxyBuilder.create((callable, instanceMethod) -> {
+            Mono<Object> result = commandExecutor.reactive((Callable<CompletionStage<Object>>) (Object) callable);
+            if (instanceMethod.getReturnType().isAssignableFrom(Flux.class)) {
+                Mono<Iterable> monoListResult = result.cast(Iterable.class);
+                return monoListResult.flatMapMany(Flux::fromIterable);
             }
-        }, instance, implementation, clazz);
+            if (instanceMethod.isAnnotationPresent(EmptyAsAbsent.class)) {
+                return result.filter(v ->
+                        !(v instanceof Map && ((Map<?, ?>) v).isEmpty())
+                            && !(v instanceof Collection && ((Collection<?>) v).isEmpty()));
+            }
+            return result;
+        }, instance, implementation, clazz, commandExecutor.getServiceManager());
     }
     
 }

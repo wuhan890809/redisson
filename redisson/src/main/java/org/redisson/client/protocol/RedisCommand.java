@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ public class RedisCommand<R> {
 
     private final String name;
     private final String subName;
+    private String script;
 
     private final MultiDecoder<R> replayMultiDecoder;
     Convertor<R> convertor = new EmptyConvertor<R>();
@@ -45,7 +46,15 @@ public class RedisCommand<R> {
         this.replayMultiDecoder = command.replayMultiDecoder;
         this.convertor = command.convertor;
     }
-    
+
+    public RedisCommand(RedisCommand<R> command, String name, String script) {
+        this.name = name;
+        this.subName = command.subName;
+        this.replayMultiDecoder = command.replayMultiDecoder;
+        this.convertor = command.convertor;
+        this.script = script;
+    }
+
     public RedisCommand(RedisCommand<R> command, String name, Convertor<R> convertor) {
         this.name = name;
         this.subName = command.subName;
@@ -87,7 +96,7 @@ public class RedisCommand<R> {
         if (replayMultiDecoder != null) {
             this.replayMultiDecoder = replayMultiDecoder;
         } else {
-            this.replayMultiDecoder = (parts, state) -> null;
+            this.replayMultiDecoder = (parts, state) -> (R) parts;
         }
     }
 
@@ -107,11 +116,24 @@ public class RedisCommand<R> {
         return convertor;
     }
 
+    public boolean isNoRetry() {
+        return RedisCommands.NO_RETRY.contains(getName())
+                || RedisCommands.NO_RETRY_COMMANDS.contains(this);
+    }
+
+    public boolean isBlockingCommand() {
+        return RedisCommands.BLOCKING_COMMAND_NAMES.contains(getName())
+                || RedisCommands.BLOCKING_COMMANDS.contains(this);
+    }
+
     public String toString() {
         StringBuilder str = new StringBuilder();
         str.append("(").append(name);
         if (subName != null) {
             str.append(" ").append(subName);
+        }
+        if (script != null) {
+            str.append(", cached script: ").append(script);
         }
         str.append(")");
         return str.toString();

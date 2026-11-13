@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,19 +16,26 @@
 package org.redisson.config;
 
 import io.netty.channel.EventLoopGroup;
+import org.redisson.client.DefaultCredentialsResolver;
 import org.redisson.client.DefaultNettyHook;
 import org.redisson.client.NettyHook;
 import org.redisson.client.codec.Codec;
-import org.redisson.codec.MarshallingCodec;
-import org.redisson.connection.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.redisson.codec.Kryo5Codec;
+import org.redisson.connection.AddressResolverGroupFactory;
+import org.redisson.connection.ConnectionListener;
+import org.redisson.connection.SequentialDnsAddressResolverFactory;
+import org.redisson.connection.StorageMemoryUsageListener;
 
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.TrustManagerFactory;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
 import java.net.URL;
+import java.util.Collections;
+import java.util.Set;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -40,8 +47,6 @@ import java.util.concurrent.TimeUnit;
  */
 public class Config {
 
-    static final Logger log = LoggerFactory.getLogger(Config.class);
-
     private SentinelServersConfig sentinelServersConfig;
 
     private MasterSlaveServersConfig masterSlaveServersConfig;
@@ -52,11 +57,17 @@ public class Config {
 
     private ReplicatedServersConfig replicatedServersConfig;
 
-    private ConnectionManager connectionManager;
+    private String password;
+
+    private String username;
+
+    private CredentialsResolver credentialsResolver = new DefaultCredentialsResolver();
 
     private int threads = 16;
 
     private int nettyThreads = 32;
+
+    private Executor nettyExecutor;
 
     private Codec codec;
 
@@ -70,11 +81,19 @@ public class Config {
 
     private long lockWatchdogTimeout = 30 * 1000;
 
+    private int lockWatchdogBatchSize = 100;
+
+    private long fairLockWaitTimeout = 5 * 60000;
+
+    private boolean checkLockSyncedSlaves = true;
+
+    private long slavesSyncTimeout = 1000;
+
     private long reliableTopicWatchdogTimeout = TimeUnit.MINUTES.toMillis(10);
 
     private boolean keepPubSubOrder = true;
 
-    private boolean useScriptCache = false;
+    private boolean useScriptCache = true;
 
     private int minCleanUpDelay = 5;
 
@@ -88,18 +107,67 @@ public class Config {
 
     private boolean useThreadClassLoader = true;
 
-    private AddressResolverGroupFactory addressResolverGroupFactory = new DnsAddressResolverGroupFactory();
+    private AddressResolverGroupFactory addressResolverGroupFactory = new SequentialDnsAddressResolverFactory();
+
+    private boolean lazyInitialization;
+
+    private Protocol protocol = Protocol.RESP2;
+
+    private Set<ValkeyCapability> valkeyCapabilities = Collections.emptySet();
+
+    private NameMapper nameMapper = NameMapper.direct();
+
+    private CommandMapper commandMapper = CommandMapper.direct();
+    
+    private SslVerificationMode sslVerificationMode = SslVerificationMode.STRICT;
+    
+    private String sslKeystoreType;
+    
+    private SslProvider sslProvider = SslProvider.JDK;
+    
+    private URL sslTruststore;
+    
+    private String sslTruststorePassword;
+    
+    private URL sslKeystore;
+    
+    private String sslKeystorePassword;
+    
+    private String[] sslProtocols;
+    
+    private String[] sslCiphers;
+    
+    private TrustManagerFactory sslTrustManagerFactory;
+    
+    private KeyManagerFactory sslKeyManagerFactory;
+    
+    private boolean tcpKeepAlive = true;
+    
+    private int tcpKeepAliveCount;
+    
+    private int tcpKeepAliveIdle;
+    
+    private int tcpKeepAliveInterval;
+    
+    private int tcpUserTimeout;
+    
+    private boolean tcpNoDelay = true;
+
+    private StorageMemoryUsageListener storageMemoryUsageListener;
+
+    private long storageStatisticsInterval;
 
     public Config() {
     }
 
     public Config(Config oldConf) {
         setNettyHook(oldConf.getNettyHook());
+        setNettyExecutor(oldConf.getNettyExecutor());
         setExecutor(oldConf.getExecutor());
 
         if (oldConf.getCodec() == null) {
             // use it by default
-            oldConf.setCodec(new MarshallingCodec());
+            oldConf.setCodec(new Kryo5Codec());
         }
 
         setConnectionListener(oldConf.getConnectionListener());
@@ -110,14 +178,45 @@ public class Config {
         setUseScriptCache(oldConf.isUseScriptCache());
         setKeepPubSubOrder(oldConf.isKeepPubSubOrder());
         setLockWatchdogTimeout(oldConf.getLockWatchdogTimeout());
+        setLockWatchdogBatchSize(oldConf.getLockWatchdogBatchSize());
+        setFairLockWaitTimeout(oldConf.getFairLockWaitTimeout());
+        setCheckLockSyncedSlaves(oldConf.isCheckLockSyncedSlaves());
+        setSlavesSyncTimeout(oldConf.getSlavesSyncTimeout());
         setNettyThreads(oldConf.getNettyThreads());
         setThreads(oldConf.getThreads());
+        setUsername(oldConf.getUsername());
+        setPassword(oldConf.getPassword());
+        setCredentialsResolver(oldConf.getCredentialsResolver());
         setCodec(oldConf.getCodec());
         setReferenceEnabled(oldConf.isReferenceEnabled());
         setEventLoopGroup(oldConf.getEventLoopGroup());
         setTransportMode(oldConf.getTransportMode());
         setAddressResolverGroupFactory(oldConf.getAddressResolverGroupFactory());
         setReliableTopicWatchdogTimeout(oldConf.getReliableTopicWatchdogTimeout());
+        setLazyInitialization(oldConf.isLazyInitialization());
+        setProtocol(oldConf.getProtocol());
+        setValkeyCapabilities(oldConf.getValkeyCapabilities());
+        setNameMapper(oldConf.getNameMapper());
+        setCommandMapper(oldConf.getCommandMapper());
+        setSslProvider(oldConf.getSslProvider());
+        setSslTruststore(oldConf.getSslTruststore());
+        setSslTruststorePassword(oldConf.getSslTruststorePassword());
+        setSslKeystoreType(oldConf.getSslKeystoreType());
+        setSslKeystore(oldConf.getSslKeystore());
+        setSslKeystorePassword(oldConf.getSslKeystorePassword());
+        setSslProtocols(oldConf.getSslProtocols());
+        setSslCiphers(oldConf.getSslCiphers());
+        setSslKeyManagerFactory(oldConf.getSslKeyManagerFactory());
+        setSslTrustManagerFactory(oldConf.getSslTrustManagerFactory());
+        setSslVerificationMode(oldConf.getSslVerificationMode());
+        setTcpKeepAlive(oldConf.isTcpKeepAlive());
+        setTcpKeepAliveCount(oldConf.getTcpKeepAliveCount());
+        setTcpKeepAliveIdle(oldConf.getTcpKeepAliveIdle());
+        setTcpKeepAliveInterval(oldConf.getTcpKeepAliveInterval());
+        setTcpUserTimeout(oldConf.getTcpUserTimeout());
+        setTcpNoDelay(oldConf.isTcpNoDelay());
+        setStorageMemoryUsageListener(oldConf.storageMemoryUsageListener);
+        setStorageStatisticsInterval(oldConf.storageStatisticsInterval);
 
         if (oldConf.getSingleServerConfig() != null) {
             setSingleServerConfig(new SingleServerConfig(oldConf.getSingleServerConfig()));
@@ -134,10 +233,6 @@ public class Config {
         if (oldConf.getReplicatedServersConfig() != null) {
             setReplicatedServersConfig(new ReplicatedServersConfig(oldConf.getReplicatedServersConfig()));
         }
-        if (oldConf.getConnectionManager() != null) {
-            useCustomServers(oldConf.getConnectionManager());
-        }
-
     }
 
     public NettyHook getNettyHook() {
@@ -156,10 +251,10 @@ public class Config {
     }
 
     /**
-     * Redis data codec. Default is MarshallingCodec codec
+     * Redis data codec. Default is Kryo5Codec codec
      *
      * @see org.redisson.client.codec.Codec
-     * @see org.redisson.codec.MarshallingCodec
+     * @see org.redisson.codec.Kryo5Codec
      * 
      * @param codec object
      * @return config
@@ -216,11 +311,11 @@ public class Config {
         return clusterServersConfig;
     }
 
-    ClusterServersConfig getClusterServersConfig() {
+    protected ClusterServersConfig getClusterServersConfig() {
         return clusterServersConfig;
     }
 
-    void setClusterServersConfig(ClusterServersConfig clusterServersConfig) {
+    protected void setClusterServersConfig(ClusterServersConfig clusterServersConfig) {
         this.clusterServersConfig = clusterServersConfig;
     }
 
@@ -241,38 +336,17 @@ public class Config {
         checkSingleServerConfig();
 
         if (replicatedServersConfig == null) {
-            replicatedServersConfig = new ReplicatedServersConfig();
+            replicatedServersConfig = config;
         }
         return replicatedServersConfig;
     }
 
-    ReplicatedServersConfig getReplicatedServersConfig() {
+    protected ReplicatedServersConfig getReplicatedServersConfig() {
         return replicatedServersConfig;
     }
 
-    void setReplicatedServersConfig(ReplicatedServersConfig replicatedServersConfig) {
+    protected void setReplicatedServersConfig(ReplicatedServersConfig replicatedServersConfig) {
         this.replicatedServersConfig = replicatedServersConfig;
-    }
-
-    /**
-     * Returns the connection manager if supplied via
-     * {@link #useCustomServers(ConnectionManager)}
-     * 
-     * @return ConnectionManager
-     */
-    ConnectionManager getConnectionManager() {
-        return connectionManager;
-    }
-
-    /**
-     * This is an extension point to supply custom connection manager.
-     * 
-     * @see ReplicatedConnectionManager on how to implement a connection
-     *      manager.
-     * @param connectionManager for supply
-     */
-    public void useCustomServers(ConnectionManager connectionManager) {
-        this.connectionManager = connectionManager;
     }
 
     /**
@@ -296,11 +370,11 @@ public class Config {
         return singleServerConfig;
     }
 
-    SingleServerConfig getSingleServerConfig() {
+    protected SingleServerConfig getSingleServerConfig() {
         return singleServerConfig;
     }
 
-    void setSingleServerConfig(SingleServerConfig singleConnectionConfig) {
+    protected void setSingleServerConfig(SingleServerConfig singleConnectionConfig) {
         this.singleServerConfig = singleConnectionConfig;
     }
 
@@ -325,11 +399,11 @@ public class Config {
         return this.sentinelServersConfig;
     }
 
-    SentinelServersConfig getSentinelServersConfig() {
+    protected SentinelServersConfig getSentinelServersConfig() {
         return sentinelServersConfig;
     }
 
-    void setSentinelServersConfig(SentinelServersConfig sentinelConnectionConfig) {
+    protected void setSentinelServersConfig(SentinelServersConfig sentinelConnectionConfig) {
         this.sentinelServersConfig = sentinelConnectionConfig;
     }
 
@@ -354,11 +428,11 @@ public class Config {
         return masterSlaveServersConfig;
     }
 
-    MasterSlaveServersConfig getMasterSlaveServersConfig() {
+    protected MasterSlaveServersConfig getMasterSlaveServersConfig() {
         return masterSlaveServersConfig;
     }
 
-    void setMasterSlaveServersConfig(MasterSlaveServersConfig masterSlaveConnectionConfig) {
+    protected void setMasterSlaveServersConfig(MasterSlaveServersConfig masterSlaveConnectionConfig) {
         this.masterSlaveServersConfig = masterSlaveConnectionConfig;
     }
 
@@ -368,6 +442,64 @@ public class Config {
 
     public boolean isSentinelConfig() {
         return sentinelServersConfig != null;
+    }
+
+    public boolean isSingleConfig() {
+        return singleServerConfig != null;
+    }
+
+    /**
+     * Password for Redis authentication. Should be null if not needed.
+     * <p>
+     * Default is <code>null</code>
+     *
+     * @param password for connection
+     * @return config
+     */
+    public Config setPassword(String password) {
+        this.password = password;
+        return this;
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    /**
+     * Username for Redis authentication. Should be null if not needed
+     * <p>
+     * Default is <code>null</code>
+     * <p>
+     * Requires Redis 6.0+
+     *
+     * @param username for connection
+     * @return config
+     */
+    public Config setUsername(String username) {
+        this.username = username;
+        return this;
+    }
+
+    public String getUsername() {
+        return username;
+    }
+
+    public CredentialsResolver getCredentialsResolver() {
+        return credentialsResolver;
+    }
+
+    /**
+     * Defines Credentials resolver which is invoked during connection for Redis server authentication.
+     * It makes possible to specify dynamically changing Redis credentials.
+     *
+     * @see EntraIdCredentialsResolver
+     *
+     * @param credentialsResolver Credentials resolver object
+     * @return config
+     */
+    public Config setCredentialsResolver(CredentialsResolver credentialsResolver) {
+        this.credentialsResolver = credentialsResolver;
+        return this;
     }
 
     public int getThreads() {
@@ -457,9 +589,38 @@ public class Config {
         return nettyThreads;
     }
 
+    public Executor getNettyExecutor() {
+        return nettyExecutor;
+    }
+
+    /**
+     * Use external Executor for Netty.
+     * <p>
+     * Virtual threads are not recommended. A Netty thread runs an event loop,
+     * and an event loop keeps its thread until the client stops.
+     * <ul>
+     * <li>{@link TransportMode#EPOLL} and {@link TransportMode#KQUEUE}:
+     * each idle event loop pins a carrier thread and the client stops.
+     * Redisson refuses this configuration.</li>
+     * <li>{@link TransportMode#NIO}: the client works, but the event loops share
+     * the carrier threads with the virtual threads of the application.
+     * Virtual threads that do not block delay all commands.</li>
+     * </ul>
+     * Virtual threads can call Redisson without this setting.
+     * <p>
+     * The caller is responsible for closing the Executor.
+     *
+     * @param nettyExecutor netty executor object
+     * @return config
+     */
+    public Config setNettyExecutor(Executor nettyExecutor) {
+        this.nettyExecutor = nettyExecutor;
+        return this;
+    }
+
     /**
      * Use external ExecutorService. ExecutorService processes 
-     * all listeners of <code>RTopic</code>, 
+     * all listeners of <code>RTopic</code>, <code>RPatternTopic</code>
      * <code>RRemoteService</code> invocation handlers  
      * and <code>RExecutorService</code> tasks.
      * <p>
@@ -503,15 +664,21 @@ public class Config {
     }
 
     /**
-     * This parameter is only used if lock has been acquired without leaseTimeout parameter definition. 
-     * Lock expires after <code>lockWatchdogTimeout</code> if watchdog 
+     * This parameter is only used if lock has been acquired without leaseTimeout parameter definition.
+     * Lock expires after <code>lockWatchdogTimeout</code> if watchdog
      * didn't extend it to next <code>lockWatchdogTimeout</code> time interval.
-     * <p>  
-     * This prevents against infinity locked locks due to Redisson client crush or 
+     * <p>
+     * This prevents against infinity locked locks due to Redisson client crush or
      * any other reason when lock can't be released in proper way.
      * <p>
+     * The same interval applies to a thread that waits for a fair lock. The watchdog
+     * renews the queue entry of the thread. The entry is removed when a full interval
+     * has passed without a renewal. Thus the waiting threads of a crashed client block
+     * the queue for at most about two intervals. The clocks of the Redisson clients that
+     * share a fair lock must agree to within this interval minus a third of it.
+     * <p>
      * Default is 30000 milliseconds
-     * 
+     *
      * @param lockWatchdogTimeout timeout in milliseconds
      * @return config
      */
@@ -522,6 +689,80 @@ public class Config {
 
     public long getLockWatchdogTimeout() {
         return lockWatchdogTimeout;
+    }
+
+
+    /**
+     * Wait time, in milliseconds, that a thread queued for a fair lock adds to the turn
+     * estimate of every thread behind it. The lock uses this value when a thread acquires
+     * the lock without a waitTime parameter. When a thread gives a waitTime, this value
+     * caps it.
+     * <p>
+     * This setting is deprecated. Only Redisson versions without liveness tracking of
+     * waiting threads read the turn estimates. When every client has liveness tracking,
+     * this setting has no effect. A thread whose Redisson instance died is removed from
+     * the queue within {@link #setLockWatchdogTimeout(long) lockWatchdogTimeout}. This
+     * setting limits the time that such a thread blocks the queue only when an older
+     * Redisson version queued the thread. The setting will be removed together with the
+     * turn estimates.
+     *
+     * Default is 5*60000 milliseconds
+     *
+     * @param fairLockWaitTimeout in milliseconds
+     * @return config
+     * @deprecated {@link #setLockWatchdogTimeout(long) lockWatchdogTimeout} limits the time
+     *             that a dead waiting thread blocks a fair lock queue. This setting only
+     *             affects clients of older Redisson versions during a rolling upgrade.
+     */
+    @Deprecated
+    public Config setFairLockWaitTimeout(long fairLockWaitTimeout) {
+        this.fairLockWaitTimeout = fairLockWaitTimeout;
+        return this;
+    }
+
+    /**
+     * @return the fair lock wait time in milliseconds
+     * @deprecated see {@link #setFairLockWaitTimeout(long)}
+     */
+    @Deprecated
+    public long getFairLockWaitTimeout() {
+        return fairLockWaitTimeout;
+    }
+
+    /**
+     * This parameter is only used if lock has been acquired without leaseTimeout parameter definition.
+     * Defines amount of locks utilized in a single lock watchdog execution.
+     * <p>
+     * Default is 100
+     *
+     * @param lockWatchdogBatchSize amount of locks used by a single lock watchdog execution
+     * @return config
+     */
+    public Config setLockWatchdogBatchSize(int lockWatchdogBatchSize) {
+        this.lockWatchdogBatchSize = lockWatchdogBatchSize;
+        return this;
+    }
+    public int getLockWatchdogBatchSize() {
+        return lockWatchdogBatchSize;
+    }
+
+    /**
+     * Defines whether to check synchronized slaves amount
+     * with actual slaves amount after lock acquisition.
+     * <p>
+     * Default is <code>true</code>.
+     *
+     * @param checkLockSyncedSlaves <code>true</code> if check required,
+     *                             <code>false</code> otherwise.
+     * @return config
+     */
+    public Config setCheckLockSyncedSlaves(boolean checkLockSyncedSlaves) {
+        this.checkLockSyncedSlaves = checkLockSyncedSlaves;
+        return this;
+    }
+
+    public boolean isCheckLockSyncedSlaves() {
+        return checkLockSyncedSlaves;
     }
 
     /**
@@ -560,62 +801,13 @@ public class Config {
         return addressResolverGroupFactory;
     }
 
-    @Deprecated
-    public static Config fromJSON(String content) throws IOException {
-        log.error("JSON configuration is deprecated and will be removed in future!");
-        ConfigSupport support = new ConfigSupport();
-        return support.fromJSON(content, Config.class);
-    }
-
-    @Deprecated
-    public static Config fromJSON(InputStream inputStream) throws IOException {
-        log.error("JSON configuration is deprecated and will be removed in future!");
-        ConfigSupport support = new ConfigSupport();
-        return support.fromJSON(inputStream, Config.class);
-    }
-
-    @Deprecated
-    public static Config fromJSON(File file, ClassLoader classLoader) throws IOException {
-        log.error("JSON configuration is deprecated and will be removed in future!");
-        ConfigSupport support = new ConfigSupport();
-        return support.fromJSON(file, Config.class, classLoader);
-    }
-
-    @Deprecated
-    public static Config fromJSON(File file) throws IOException {
-        log.error("JSON configuration is deprecated and will be removed in future!");
-        return fromJSON(file, null);
-    }
-
-    @Deprecated
-    public static Config fromJSON(URL url) throws IOException {
-        log.error("JSON configuration is deprecated and will be removed in future!");
-        ConfigSupport support = new ConfigSupport();
-        return support.fromJSON(url, Config.class);
-    }
-
-    @Deprecated
-    public static Config fromJSON(Reader reader) throws IOException {
-        log.error("JSON configuration is deprecated and will be removed in future!");
-        ConfigSupport support = new ConfigSupport();
-        return support.fromJSON(reader, Config.class);
-    }
-
-    @Deprecated
-    public String toJSON() throws IOException {
-        log.error("JSON configuration is deprecated and will be removed in future!");
-        ConfigSupport support = new ConfigSupport();
-        return support.toJSON(this);
-    }
-
     /**
      * Read config object stored in YAML format from <code>String</code>
      *
      * @param content of config
      * @return config
-     * @throws IOException error
      */
-    public static Config fromYAML(String content) throws IOException {
+    public static Config fromYAML(String content) {
         ConfigSupport support = new ConfigSupport();
         return support.fromYAML(content, Config.class);
     }
@@ -625,9 +817,8 @@ public class Config {
      *
      * @param inputStream object
      * @return config
-     * @throws IOException error
      */
-    public static Config fromYAML(InputStream inputStream) throws IOException {
+    public static Config fromYAML(InputStream inputStream) {
         ConfigSupport support = new ConfigSupport();
         return support.fromYAML(inputStream, Config.class);
     }
@@ -688,7 +879,7 @@ public class Config {
      * Most Redisson methods are Lua-script based and this setting turned
      * on could increase speed of such methods execution and save network traffic.
      * <p>
-     * Default is <code>false</code>.
+     * Default is <code>true</code>.
      * 
      * @param useScriptCache - <code>true</code> if Lua-script caching is required, <code>false</code> otherwise.
      * @return config
@@ -751,7 +942,7 @@ public class Config {
      * <p>
      * Default is <code>100</code>.
      *
-     * @param cleanUpKeysAmount - delay in seconds
+     * @param cleanUpKeysAmount - amount
      * @return config
      */
     public Config setCleanUpKeysAmount(int cleanUpKeysAmount) {
@@ -812,6 +1003,430 @@ public class Config {
      */
     public Config setConnectionListener(ConnectionListener connectionListener) {
         this.connectionListener = connectionListener;
+        return this;
+    }
+
+    public long getSlavesSyncTimeout() {
+        return slavesSyncTimeout;
+    }
+
+    /**
+     * Defines slaves synchronization timeout applied to each operation of {@link org.redisson.api.RLock},
+     * {@link org.redisson.api.RSemaphore}, {@link org.redisson.api.RPermitExpirableSemaphore} objects.
+     * <p>
+     * Default is <code>1000</code> milliseconds.
+     *
+     * @param timeout timeout in milliseconds
+     * @return config
+     */
+    public Config setSlavesSyncTimeout(long timeout) {
+        this.slavesSyncTimeout = timeout;
+        return this;
+    }
+
+    public boolean isLazyInitialization() {
+        return lazyInitialization;
+    }
+
+    /**
+     * Defines whether Redisson connects to Redis only when
+     * first Redis call is made and not during Redisson instance creation.
+     * <p>
+     * Default value is <code>false</code>
+     *
+     * @param lazyInitialization <code>true</code> connects to Redis only when first Redis call is made,
+     *                           <code>false</code> connects to Redis during Redisson instance creation.
+     * @return config
+     */
+    public Config setLazyInitialization(boolean lazyInitialization) {
+        this.lazyInitialization = lazyInitialization;
+        return this;
+    }
+
+    public Protocol getProtocol() {
+        return protocol;
+    }
+
+    /**
+     * Defines Redis protocol version.
+     * <p>
+     * Default value is <code>RESP2</code>
+     *
+     * @param protocol Redis protocol version
+     * @return config
+     */
+    public Config setProtocol(Protocol protocol) {
+        this.protocol = protocol;
+        return this;
+    }
+
+    public Set<ValkeyCapability> getValkeyCapabilities() {
+        return valkeyCapabilities;
+    }
+
+    /**
+     * Allows to declare which Valkey capabilities should be supported.
+     *
+     * @param valkeyCapabilities Valkey capabilites
+     * @return config
+     */
+    public Config setValkeyCapabilities(Set<ValkeyCapability> valkeyCapabilities) {
+        this.valkeyCapabilities = valkeyCapabilities;
+        return this;
+    }
+
+    public NameMapper getNameMapper() {
+        return nameMapper;
+    }
+
+    /**
+     * Defines Name mapper which maps Redisson object name.
+     * Applied to all Redisson objects.
+     *
+     * @param nameMapper name mapper object
+     * @return config
+     */
+    public Config setNameMapper(NameMapper nameMapper) {
+        this.nameMapper = nameMapper;
+        return this;
+    }
+
+    public CommandMapper getCommandMapper() {
+        return commandMapper;
+    }
+
+    /**
+     * Defines Command mapper which maps Redis command name.
+     * Applied to all Redis commands.
+     *
+     * @param commandMapper Redis command name mapper object
+     * @return config
+     */
+    public Config setCommandMapper(CommandMapper commandMapper) {
+        this.commandMapper = commandMapper;
+        return this;
+    }
+    
+    public SslProvider getSslProvider() {
+        return sslProvider;
+    }
+    
+    /**
+     * Defines SSL provider used to handle SSL connections.
+     * <p>
+     * Default is <code>JDK</code>
+     *
+     * @param sslProvider ssl provider
+     * @return config
+     */
+    public Config setSslProvider(SslProvider sslProvider) {
+        this.sslProvider = sslProvider;
+        return this;
+    }
+    
+    public URL getSslTruststore() {
+        return sslTruststore;
+    }
+    
+    /**
+     * Defines path to SSL truststore
+     * <p>
+     * Default is <code>null</code>
+     *
+     * @param sslTruststore truststore path
+     * @return config
+     */
+    public Config setSslTruststore(URL sslTruststore) {
+        this.sslTruststore = sslTruststore;
+        return this;
+    }
+    
+    public String getSslTruststorePassword() {
+        return sslTruststorePassword;
+    }
+    
+    /**
+     * Defines password for SSL truststore.
+     * SSL truststore is read on each new connection creation and can be dynamically reloaded.
+     * <p>
+     * Default is <code>null</code>
+     *
+     * @param sslTruststorePassword - password
+     * @return config
+     */
+    public Config setSslTruststorePassword(String sslTruststorePassword) {
+        this.sslTruststorePassword = sslTruststorePassword;
+        return this;
+    }
+    
+    public URL getSslKeystore() {
+        return sslKeystore;
+    }
+    
+    /**
+     * Defines path to SSL keystore.
+     * SSL keystore is read on each new connection creation and can be dynamically reloaded.
+     * <p>
+     * Default is <code>null</code>
+     *
+     * @param sslKeystore path to keystore
+     * @return config
+     */
+    public Config setSslKeystore(URL sslKeystore) {
+        this.sslKeystore = sslKeystore;
+        return this;
+    }
+    
+    public String getSslKeystorePassword() {
+        return sslKeystorePassword;
+    }
+    
+    /**
+     * Defines password for SSL keystore
+     * <p>
+     * Default is <code>null</code>
+     *
+     * @param sslKeystorePassword password
+     * @return config
+     */
+    public Config setSslKeystorePassword(String sslKeystorePassword) {
+        this.sslKeystorePassword = sslKeystorePassword;
+        return this;
+    }
+    
+    public String[] getSslProtocols() {
+        return sslProtocols;
+    }
+    
+    /**
+     * Defines SSL protocols.
+     * Example values: TLSv1.3, TLSv1.2, TLSv1.1, TLSv1
+     * <p>
+     * Default is <code>null</code>
+     *
+     * @param sslProtocols protocols
+     * @return config
+     */
+    public Config setSslProtocols(String[] sslProtocols) {
+        this.sslProtocols = sslProtocols;
+        return this;
+    }
+    
+    public String getSslKeystoreType() {
+        return sslKeystoreType;
+    }
+    
+    /**
+     * Defines SSL keystore type.
+     * <p>
+     * Default is <code>null</code>
+     *
+     * @param sslKeystoreType keystore type
+     * @return config
+     */
+    public Config setSslKeystoreType(String sslKeystoreType) {
+        this.sslKeystoreType = sslKeystoreType;
+        return this;
+    }
+    
+    public String[] getSslCiphers() {
+        return sslCiphers;
+    }
+    
+    /**
+     * Defines SSL ciphers.
+     * <p>
+     * Default is <code>null</code>
+     *
+     * @param sslCiphers ciphers
+     * @return config
+     */
+    public Config setSslCiphers(String[] sslCiphers) {
+        this.sslCiphers = sslCiphers;
+        return this;
+    }
+    
+    public TrustManagerFactory getSslTrustManagerFactory() {
+        return sslTrustManagerFactory;
+    }
+    
+    /**
+     * Defines SSL TrustManagerFactory.
+     * <p>
+     * Default is <code>null</code>
+     *
+     * @param trustManagerFactory trust manager value
+     * @return config
+     */
+    public Config setSslTrustManagerFactory(TrustManagerFactory trustManagerFactory) {
+        this.sslTrustManagerFactory = trustManagerFactory;
+        return this;
+    }
+    
+    public KeyManagerFactory getSslKeyManagerFactory() {
+        return sslKeyManagerFactory;
+    }
+    
+    /**
+     * Defines SSL KeyManagerFactory.
+     * <p>
+     * Default is <code>null</code>
+     *
+     * @param keyManagerFactory key manager value
+     * @return config
+     */
+    public Config setSslKeyManagerFactory(KeyManagerFactory keyManagerFactory) {
+        this.sslKeyManagerFactory = keyManagerFactory;
+        return this;
+    }
+    
+    public SslVerificationMode getSslVerificationMode() {
+        return sslVerificationMode;
+    }
+    
+    /**
+     * Defines SSL verification mode, which prevents man-in-the-middle attacks.
+     *
+     * <p>
+     * Default is <code>SslVerificationMode.STRICT</code>
+     *
+     * @param sslVerificationMode mode value
+     * @return config
+     */
+    public Config setSslVerificationMode(SslVerificationMode sslVerificationMode) {
+        this.sslVerificationMode = sslVerificationMode;
+        return this;
+    }
+    
+    public boolean isTcpKeepAlive() {
+        return tcpKeepAlive;
+    }
+    
+    /**
+     * Enables TCP keepAlive for connection
+     * <p>
+     * Default is <code>true</code>
+     *
+     * @param tcpKeepAlive boolean value
+     * @return config
+     */
+    public Config setTcpKeepAlive(boolean tcpKeepAlive) {
+        this.tcpKeepAlive = tcpKeepAlive;
+        return this;
+    }
+    
+    public int getTcpKeepAliveCount() {
+        return tcpKeepAliveCount;
+    }
+    
+    /**
+     * Defines the maximum number of keepalive probes
+     * TCP should send before dropping the connection.
+     *
+     * @param tcpKeepAliveCount maximum number of keepalive probes
+     * @return config
+     */
+    public Config setTcpKeepAliveCount(int tcpKeepAliveCount) {
+        this.tcpKeepAliveCount = tcpKeepAliveCount;
+        return this;
+    }
+    
+    public int getTcpKeepAliveIdle() {
+        return tcpKeepAliveIdle;
+    }
+    
+    /**
+     * Defines the time in seconds the connection needs to remain idle
+     * before TCP starts sending keepalive probes,
+     *
+     * @param tcpKeepAliveIdle time in seconds
+     * @return config
+     */
+    public Config setTcpKeepAliveIdle(int tcpKeepAliveIdle) {
+        this.tcpKeepAliveIdle = tcpKeepAliveIdle;
+        return this;
+    }
+    
+    public int getTcpKeepAliveInterval() {
+        return tcpKeepAliveInterval;
+    }
+    
+    /**
+     * Defines the time in seconds between individual keepalive probes.
+     *
+     * @param tcpKeepAliveInterval time in seconds
+     * @return config
+     */
+    public Config setTcpKeepAliveInterval(int tcpKeepAliveInterval) {
+        this.tcpKeepAliveInterval = tcpKeepAliveInterval;
+        return this;
+    }
+    
+    public int getTcpUserTimeout() {
+        return tcpUserTimeout;
+    }
+    
+    /**
+     * Defines the maximum amount of time in milliseconds that transmitted data may
+     * remain unacknowledged, or buffered data may remain untransmitted
+     * (due to zero window size) before TCP will forcibly close the connection.
+     * <p>
+     * This setting is applied only to Epoll and IoUring transport.
+     *
+     * @param tcpUserTimeout time in milliseconds
+     * @return config
+     */
+    public Config setTcpUserTimeout(int tcpUserTimeout) {
+        this.tcpUserTimeout = tcpUserTimeout;
+        return this;
+    }
+    
+    public boolean isTcpNoDelay() {
+        return tcpNoDelay;
+    }
+    
+    /**
+     * Enables TCP noDelay for connection
+     * <p>
+     * Default is <code>true</code>
+     *
+     * @param tcpNoDelay boolean value
+     * @return config
+     */
+    public Config setTcpNoDelay(boolean tcpNoDelay) {
+        this.tcpNoDelay = tcpNoDelay;
+        return this;
+    }
+
+    public StorageMemoryUsageListener getStorageMemoryUsageListener() {
+        return storageMemoryUsageListener;
+    }
+
+    /**
+     * Sets storageMemoryUsageListener listener which is triggered
+     * when storage memory usage percentage (Valkey or Redis INFO MEMORY field: used_memory_dataset_perc)
+     * changed in every redis node.
+     *
+     * @param storageMemoryUsageListener - storage memory usage listener
+     * @return config
+     */
+    public Config setStorageMemoryUsageListener(StorageMemoryUsageListener storageMemoryUsageListener) {
+        this.storageMemoryUsageListener = storageMemoryUsageListener;
+        return this;
+    }
+
+    public long getStorageStatisticsInterval() {
+        return storageStatisticsInterval;
+    }
+
+    /**
+     * Defines the time in milliseconds between storage statistics.
+     *
+     * @param storageStatisticsInterval time interval in milliseconds
+     * @return config
+     */
+    public Config setStorageStatisticsInterval(long storageStatisticsInterval) {
+        this.storageStatisticsInterval = storageStatisticsInterval;
         return this;
     }
 }

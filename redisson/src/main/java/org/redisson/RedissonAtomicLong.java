@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,16 +15,24 @@
  */
 package org.redisson;
 
-import java.util.Collections;
-
+import org.redisson.api.ObjectListener;
 import org.redisson.api.RAtomicLong;
 import org.redisson.api.RFuture;
+import org.redisson.api.atomic.BaseIncrementParams;
+import org.redisson.api.atomic.CompareAndDeleteArgs;
+import org.redisson.api.atomic.LongIncrementArgs;
+import org.redisson.api.atomic.LongIncrementParams;
+import org.redisson.api.listener.IncrByListener;
 import org.redisson.client.codec.LongCodec;
 import org.redisson.client.codec.StringCodec;
 import org.redisson.client.protocol.RedisCommands;
 import org.redisson.client.protocol.RedisStrictCommand;
-import org.redisson.client.protocol.convertor.Convertor;
 import org.redisson.command.CommandAsyncExecutor;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
 
 /**
  * Distributed alternative to the {@link java.util.concurrent.atomic.AtomicLong}
@@ -36,6 +44,41 @@ public class RedissonAtomicLong extends RedissonExpirable implements RAtomicLong
 
     public RedissonAtomicLong(CommandAsyncExecutor commandExecutor, String name) {
         super(commandExecutor, name);
+    }
+
+    @Override
+    public boolean compareAndDelete(CompareAndDeleteArgs args) {
+        return get(compareAndDeleteAsync(args));
+    }
+
+    @Override
+    public RFuture<Boolean> compareAndDeleteAsync(CompareAndDeleteArgs args) {
+        Objects.requireNonNull(args, "Args can't be null");
+
+        return commandExecutor.evalWriteAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+              "local currValue = redis.call('get', KEYS[1]); "
+                  + "if currValue == false then "
+                      + "return 0; "
+                  + "end; "
+
+                  + "currValue = tonumber(currValue); "
+                  + "local threshold = tonumber(ARGV[1]); "
+                  + "local op = ARGV[2]; "
+                  + "local match = false; "
+                  + "if op == '<' then match = currValue < threshold; "
+                  + "elseif op == '<=' then match = currValue <= threshold; "
+                  + "elseif op == '>' then match = currValue > threshold; "
+                  + "elseif op == '>=' then match = currValue >= threshold; "
+                  + "elseif op == '==' then match = currValue == threshold; "
+                  + "elseif op == '~=' then match = currValue ~= threshold; "
+                  + "end; "
+                  + "if match then "
+                      + "redis.call('del', KEYS[1]); "
+                      + "return 1; "
+                  + "end; "
+                  + "return 0;",
+                Collections.singletonList(getRawName()),
+                args.getThreshold().longValue(), args.getCondition().getOperator());
     }
 
     @Override
@@ -108,12 +151,7 @@ public class RedissonAtomicLong extends RedissonExpirable implements RAtomicLong
 
     @Override
     public RFuture<Long> getAndAddAsync(final long delta) {
-        return commandExecutor.writeAsync(getRawName(), StringCodec.INSTANCE, new RedisStrictCommand<Long>("INCRBY", new Convertor<Long>() {
-            @Override
-            public Long convert(Object obj) {
-                return ((Long) obj) - delta;
-            }
-        }), getRawName(), delta);
+        return commandExecutor.writeAsync(getRawName(), StringCodec.INSTANCE, new RedisStrictCommand<Long>("INCRBY", obj -> ((Long) obj) - delta), getRawName(), delta);
     }
 
 
@@ -135,6 +173,56 @@ public class RedissonAtomicLong extends RedissonExpirable implements RAtomicLong
     @Override
     public RFuture<Long> incrementAndGetAsync() {
         return commandExecutor.writeAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.INCR, getRawName());
+    }
+
+    @Override
+    public long incrementAndGet(LongIncrementArgs args) {
+        return get(incrementAndGetAsync(args));
+    }
+
+    @Override
+    public RFuture<Long> incrementAndGetAsync(LongIncrementArgs args) {
+        return commandExecutor.writeAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.INCREX_LONG, createIncrementParams(args));
+    }
+
+    private Object[] createIncrementParams(LongIncrementArgs args) {
+        Objects.requireNonNull(args, "Args can't be null");
+        LongIncrementParams incrementParams = (LongIncrementParams) args;
+
+        List<Object> params = new ArrayList<>();
+        params.add(getRawName());
+        if (incrementParams.getIncrement() != null) {
+            params.add("BYINT");
+            params.add(incrementParams.getIncrement().longValue());
+        }
+        if (incrementParams.getLowerBound() != null) {
+            params.add("LBOUND");
+            params.add(incrementParams.getLowerBound().longValue());
+        }
+        if (incrementParams.getUpperBound() != null) {
+            params.add("UBOUND");
+            params.add(incrementParams.getUpperBound().longValue());
+        }
+        if (incrementParams.isSaturate()) {
+            params.add("SATURATE");
+        }
+        addExpirationParams(incrementParams, params);
+        return params.toArray();
+    }
+
+    private void addExpirationParams(BaseIncrementParams<?> args, List<Object> params) {
+        if (args.getTimeToLive() != null) {
+            params.add("PX");
+            params.add(args.getTimeToLive().toMillis());
+        } else if (args.getExpireAt() != null) {
+            params.add("PXAT");
+            params.add(args.getExpireAt().toEpochMilli());
+        } else if (args.isPersist()) {
+            params.add("PERSIST");
+        }
+        if (args.isExpireIfNotSet()) {
+            params.add("ENX");
+        }
     }
 
     @Override
@@ -166,9 +254,72 @@ public class RedissonAtomicLong extends RedissonExpirable implements RAtomicLong
     public RFuture<Void> setAsync(long newValue) {
         return commandExecutor.writeAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.SET, getRawName(), newValue);
     }
-
+    
+    @Override
+    public boolean setIfLess(long less, long value) {
+        return get(setIfLessAsync(less, value));
+    }
+    
+    @Override
+    public RFuture<Boolean> setIfLessAsync(long less, long value) {
+        return commandExecutor.evalWriteAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+        "local currValue = redis.call('get', KEYS[1]); "
+                + "currValue = currValue == false and 0 or tonumber(currValue);"
+                + "if currValue < tonumber(ARGV[1]) then "
+                    + "redis.call('set', KEYS[1], ARGV[2]); "
+                    + "return 1;"
+                + "end; "
+                + "return 0;",
+                Collections.<Object>singletonList(getRawName()), less, value);
+    }
+    
+    @Override
+    public boolean setIfGreater(long greater, long value) {
+        return get(setIfGreaterAsync(greater, value));
+    }
+    
+    @Override
+    public RFuture<Boolean> setIfGreaterAsync(long greater, long value) {
+        return commandExecutor.evalWriteAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+                "local currValue = redis.call('get', KEYS[1]); "
+                        + "currValue = currValue == false and 0 or tonumber(currValue);"
+                        + "if currValue > tonumber(ARGV[1]) then "
+                            + "redis.call('set', KEYS[1], ARGV[2]); "
+                            + "return 1;"
+                        + "end; "
+                        + "return 0;",
+                Collections.<Object>singletonList(getRawName()), greater, value);
+    }
+    
     public String toString() {
         return Long.toString(get());
+    }
+
+    @Override
+    public int addListener(ObjectListener listener) {
+        if (listener instanceof IncrByListener) {
+            return addListener("__keyevent@*:incrby", (IncrByListener) listener, IncrByListener::onChange);
+        }
+        return super.addListener(listener);
+    }
+
+    @Override
+    public RFuture<Integer> addListenerAsync(ObjectListener listener) {
+        if (listener instanceof IncrByListener) {
+            return addListenerAsync("__keyevent@*:incrby", (IncrByListener) listener, IncrByListener::onChange);
+        }
+        return super.addListenerAsync(listener);
+    }
+
+    @Override
+    public void removeListener(int listenerId) {
+        removeListener(listenerId, "__keyevent@*:incrby");
+        super.removeListener(listenerId);
+    }
+
+    @Override
+    public RFuture<Void> removeListenerAsync(int listenerId) {
+        return removeListenerAsync(listenerId, "__keyevent@*:incrby");
     }
 
 }

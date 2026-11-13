@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,20 +15,11 @@
  */
 package org.redisson;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-import java.util.ListIterator;
-import java.util.NoSuchElementException;
-import java.util.concurrent.TimeUnit;
-
 import org.redisson.api.RFuture;
 import org.redisson.api.RList;
 import org.redisson.api.SortOrder;
 import org.redisson.api.mapreduce.RCollectionMapReduce;
+import org.redisson.client.RedisClient;
 import org.redisson.client.codec.Codec;
 import org.redisson.client.protocol.RedisCommand;
 import org.redisson.client.protocol.RedisCommands;
@@ -36,6 +27,10 @@ import org.redisson.client.protocol.convertor.BooleanNumberReplayConvertor;
 import org.redisson.client.protocol.convertor.Convertor;
 import org.redisson.client.protocol.convertor.IntegerReplayConvertor;
 import org.redisson.command.CommandAsyncExecutor;
+import org.redisson.iterator.RedissonBaseIterator;
+
+import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 /**
  * List based Multimap Cache values holder
@@ -68,12 +63,17 @@ public class RedissonListMultimapValues<V> extends RedissonExpirable implements 
     }
     
     @Override
-    public RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit) {
+    protected RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit, String param, String... keys) {
         throw new UnsupportedOperationException("This operation is not supported for SetMultimap values Set");
     }
-    
+
     @Override
-    public RFuture<Boolean> expireAtAsync(long timestamp) {
+    protected RFuture<Boolean> blessKeysAsync(String subcommand, String... keys) {
+        throw new UnsupportedOperationException("This operation is not supported for ListMultimap values List");
+    }
+
+    @Override
+    protected RFuture<Boolean> expireAtAsync(long timestamp, String param, String... keys) {
         throw new UnsupportedOperationException("This operation is not supported for SetMultimap values Set");
     }
     
@@ -114,6 +114,11 @@ public class RedissonListMultimapValues<V> extends RedissonExpirable implements 
                 "end; " +
                 "return res; ",
                 Arrays.<Object>asList(timeoutSetName, getRawName()), System.currentTimeMillis(), key);
+    }
+
+    @Override
+    public RFuture<Boolean> copyAsync(List<Object> keys, int database, boolean replace) {
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -237,7 +242,7 @@ public class RedissonListMultimapValues<V> extends RedissonExpirable implements 
               + "end; " +
                 "local items = redis.call('lrange', KEYS[2], 0, -1);" +
                         "for i = 1, #items, 1 do " +
-                            "for j = 2, #ARGV, 1 do "
+                            "for j = #ARGV, 3, -1 do "
                             + "if ARGV[j] == items[i] "
                             + "then table.remove(ARGV, j) end "
                         + "end; "
@@ -290,7 +295,7 @@ public class RedissonListMultimapValues<V> extends RedissonExpirable implements 
                       + "end; " +
                 
                         "local v = 0 " +
-                        "for i = 2, #ARGV, 1 do "
+                        "for i = 3, #ARGV, 1 do "
                             + "if redis.call('lrem', KEYS[2], 0, ARGV[i]) == 1 "
                             + "then v = 1 end "
                         +"end "
@@ -331,7 +336,7 @@ public class RedissonListMultimapValues<V> extends RedissonExpirable implements 
                        + "while i <= #s do "
                             + "local element = s[i]; "
                             + "local isInAgrs = false; "
-                            + "for j = 2, #ARGV, 1 do "
+                            + "for j = 3, #ARGV, 1 do "
                                 + "if ARGV[j] == element then "
                                     + "isInAgrs = true; "
                                     + "break; "
@@ -354,12 +359,70 @@ public class RedissonListMultimapValues<V> extends RedissonExpirable implements 
     }
 
     @Override
-    public List<V> get(int...indexes) {
+    public List<V> get(int... indexes) {
         return get(getAsync(indexes));
     }
-    
+
     @Override
-    public RFuture<List<V>> getAsync(int...indexes) {
+    public Iterator<V> distributedIterator(final int count) {
+        String iteratorName = "__redisson_set_cursor_{" + getRawName() + "}";
+        return distributedIterator(iteratorName, count);
+    }
+
+    @Override
+    public Iterator<V> distributedIterator(final String iteratorName, final int count) {
+        return new RedissonBaseIterator<V>() {
+
+            @Override
+            protected ScanResult<Object> iterator(RedisClient client, String nextIterPos) {
+                return distributedScanIterator(iteratorName, count);
+            }
+
+            @Override
+            protected void remove(Object value) {
+                RedissonListMultimapValues.this.remove((V) value);
+            }
+        };
+    }
+
+    private ScanResult<Object> distributedScanIterator(String iteratorName, int count) {
+        return get(distributedScanIteratorAsync(iteratorName, count));
+    }
+
+    private RFuture<ScanResult<Object>> distributedScanIteratorAsync(String iteratorName, int count) {
+        return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_SCAN,
+                "local cursor = redis.call('get', KEYS[3]); "
+                + "if cursor ~= false then "
+                    + "cursor = tonumber(cursor); "
+                + "else "
+                    + "cursor = 0;"
+                + "end;"
+                + "if start_index == -1 then "
+                    + "return {0, {}}; "
+                + "end;"
+                + "local end_index = start_index + ARGV[1];"
+                + "local result; "
+                + "result = redis.call('lrange', KEYS[1], start_index, end_index - 1); "
+                + "if end_index > redis.call('llen', KEYS[1]) then "
+                    + "end_index = -1;"
+                + "end; "
+                + "redis.call('setex', KEYS[2], 3600, end_index);"
+                + "local expireDate = 92233720368547758; "
+                + "local expirations = redis.call('zmscore', KEYS[1], result[2])"
+                + "for i = #expirations, 1, -1 do "
+                    + "if expirations[i] ~= false then "
+                        + "local expireDate = tonumber(expireDateScore) "
+                        + "if expireDate <= tonumber(ARGV[1]) then "
+                            + "table.remove(result[2], i);"
+                        + "end; "
+                    + "end; "
+                + "end; "
+                + "return {end_index, result[2]};",
+                Arrays.<Object>asList(timeoutSetName, getRawName(), iteratorName), System.currentTimeMillis(), count);
+    }
+
+    @Override
+    public RFuture<List<V>> getAsync(int... indexes) {
         List<Object> params = new ArrayList<Object>();
         params.add(System.currentTimeMillis());
         params.add(encodeMapKey(key));

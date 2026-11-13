@@ -2,7 +2,7 @@ package org.redisson.transaction;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.redisson.BaseTest;
+import org.redisson.RedisDockerTest;
 import org.redisson.api.RMap;
 import org.redisson.api.RTransaction;
 import org.redisson.api.TransactionOptions;
@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-public abstract class RedissonBaseTransactionalMapTest extends BaseTest {
+public abstract class RedissonBaseTransactionalMapTest extends RedisDockerTest {
 
     protected abstract RMap<String, String> getMap();
     
@@ -216,6 +216,16 @@ public abstract class RedissonBaseTransactionalMapTest extends BaseTest {
         assertThat(m.get("5")).isEqualTo("8");
     }
 
+    @Test
+    public void testFastRemove() {
+        RTransaction transaction = redisson.createTransaction(TransactionOptions.defaults());
+        RMap<String, String> map = getTransactionalMap(transaction);
+        assertThat(map.fastPut("1", "2")).isTrue();
+        assertThat(map.fastRemove("1")).isEqualTo(1);
+        transaction.commit();
+        redisson.getKeys().deleteByPattern("*redisson_unlock_latch*");
+        assertThat(redisson.getKeys().count()).isZero();
+    }
     
     @Test
     public void testRemove() {
@@ -292,12 +302,32 @@ public abstract class RedissonBaseTransactionalMapTest extends BaseTest {
         assertThat(m.get("3")).isEqualTo("4");
         
         transaction.rollback();
-        
+
+        redisson.getKeys().deleteByPattern("*redisson_unlock_latch*");
         assertThat(redisson.getKeys().count()).isEqualTo(1);
         
         assertThat(m.get("1")).isEqualTo("2");
         assertThat(m.get("3")).isEqualTo("4");
     }
 
-    
+    @Test
+    public void testFastRemoveNonExistentKeyDoesNotLeakLock() {
+        RMap<String, String> m = getMap();
+
+        // Remove a non-existent key in a transaction and commit
+        RTransaction tx1 = redisson.createTransaction(TransactionOptions.defaults().timeout(5, TimeUnit.SECONDS));
+        RMap<String, String> map1 = getTransactionalMap(tx1);
+        map1.fastRemove("nonexistent-key");
+        tx1.commit();
+
+        // Second transaction removing the same non-existent key should NOT timeout
+        RTransaction tx2 = redisson.createTransaction(TransactionOptions.defaults().timeout(5, TimeUnit.SECONDS));
+        RMap<String, String> map2 = getTransactionalMap(tx2);
+        map2.fastRemove("nonexistent-key");
+        tx2.commit();
+
+        assertThat(m.size()).isZero();
+    }
+
+
 }

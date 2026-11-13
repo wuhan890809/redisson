@@ -10,45 +10,35 @@ import org.redisson.client.RedisException;
 import org.redisson.client.codec.IntegerCodec;
 import org.redisson.client.codec.StringCodec;
 import org.redisson.config.Config;
+import org.testcontainers.containers.GenericContainer;
 
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-public class RedissonListTest extends BaseTest {
+public class RedissonListTest extends RedisDockerTest {
 
     @Test
-    public void testAddListener() throws RedisRunner.FailedToStartRedisException, IOException, InterruptedException {
-        RedisRunner.RedisProcess instance = new RedisRunner()
-                .nosave()
-                .randomPort()
-                .randomDir()
-                .notifyKeyspaceEvents(
-                                    RedisRunner.KEYSPACE_EVENTS_OPTIONS.E,
-                                    RedisRunner.KEYSPACE_EVENTS_OPTIONS.l)
-                .run();
+    public void testAddListener() {
+        testWithParams(redisson -> {
+            RList<Integer> al = redisson.getList("name");
+            CountDownLatch latch = new CountDownLatch(1);
+            al.addListener((ListAddListener) name -> latch.countDown());
+            al.add(1);
 
-        Config config = new Config();
-        config.useSingleServer().setAddress(instance.getRedisServerAddressAndPort());
-        RedissonClient redisson = Redisson.create(config);
-
-        RList<Integer> al = redisson.getList("name");
-        CountDownLatch latch = new CountDownLatch(1);
-        al.addListener(new ListAddListener() {
-            @Override
-            public void onListAdd(String name) {
-                latch.countDown();
+            try {
+                assertThat(latch.await(1, TimeUnit.SECONDS)).isTrue();
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
             }
-        });
-        al.add(1);
-
-        assertThat(latch.await(1, TimeUnit.SECONDS)).isTrue();
-
-        redisson.shutdown();
-        instance.stop();
+        }, NOTIFY_KEYSPACE_EVENTS, "El");
     }
 
     @Test
@@ -764,6 +754,26 @@ public class RedissonListTest extends BaseTest {
     }
 
     @Test
+    public void testSubListContainsAll() {
+        List<Integer> list = redisson.getList("list");
+        list.add(1);
+        list.add(2);
+        list.add(3);
+        list.add(4);
+        list.add(5);
+        list.add(6);
+        list.add(7);
+        list.add(8);
+        list.add(9);
+        list.add(10);
+
+        List<Integer> subList = list.subList(3, 7);
+        assertThat(subList.containsAll(List.of(4, 5))).isTrue();
+        assertThat(subList.containsAll(List.of(4, 4))).isTrue();
+        assertThat(subList.containsAll(List.of(4, 5, 4))).isTrue();
+    }
+
+    @Test
     public void testSubListMiddle() {
         List<Integer> list = redisson.getList("list");
         list.add(1);
@@ -906,6 +916,22 @@ public class RedissonListTest extends BaseTest {
     }
 
     @Test
+    public void testRemoveWithCount() {
+        RList<Integer> list = redisson.getList("list");
+        list.add(1);
+        list.add(2);
+        list.add(3);
+        list.add(3);
+        list.add(4);
+
+        assertThat(list.remove(1, 5)).isTrue();
+        assertThat(list).containsExactly(2, 3, 3, 4);
+
+        assertThat(list.remove(3, 5)).isTrue();
+        assertThat(list).containsExactly(2, 4);
+    }
+
+    @Test
     public void testSubListRemove() {
         List<Integer> list = redisson.getList("list");
         list.add(1);
@@ -929,7 +955,121 @@ public class RedissonListTest extends BaseTest {
         assertThat(val1).isEqualTo(6);
         assertThat(subList.iterator()).toIterable().containsExactly(3, 4);
     }
+    
+    @Test
+    public void testSubListRemoveAll() {
+        List<Integer> list = redisson.getList("list");
+        list.add(1);
+        list.add(2);
+        list.add(3);
+        list.add(4);
+        list.add(5);
+        list.add(6);
+        list.add(7);
+        list.add(8);
+        
+        List<Integer> subList = list.subList(2, 6);
+        assertThat(subList.iterator()).toIterable().containsExactly(3, 4, 5, 6);
+        assertThat(subList.removeAll(List.of(3, 5))).isTrue();
+        assertThat(subList.iterator()).toIterable().containsExactly(4, 6, 7, 8);
+    }
+    
+    @Test
+    public void testEmptySubListRemovalsLeaveParentUntouched() {
+        assertEmptySubListRemoval(subList -> subList.remove((Object) 1));
+    }
 
+    @Test
+    public void testEmptySubListRemoveAllLeavesParentUntouched() {
+        assertEmptySubListRemoval(subList -> subList.removeAll(List.of(1, 2)));
+    }
+
+    @Test
+    public void testEmptySubListRetainAllLeavesParentUntouched() {
+        assertEmptySubListRemoval(subList -> subList.retainAll(Collections.emptyList()));
+    }
+
+    private void assertEmptySubListRemoval(Function<RList<Integer>, Boolean> removal) {
+        RList<Integer> list = redisson.getList("list");
+        list.addAll(List.of(1, 2, 3));
+        for (int index : new int[] {0, 1, 3}) {
+            RList<Integer> subList = list.subList(index, index);
+            assertThat(removal.apply(subList)).isFalse();
+            assertThat(subList.readAll()).isEmpty();
+            assertThat(subList.iterator().hasNext()).isFalse();
+            assertThat(list.readAll()).containsExactly(1, 2, 3);
+        }
+    }
+
+    @Test
+    public void testEmptySubListRemoveAllRejectsNull() {
+        RList<Integer> list = redisson.getList("list");
+        list.addAll(List.of(1, 2, 3));
+        for (int index : new int[] {0, 1, 3}) {
+            RList<Integer> subList = list.subList(index, index);
+            Assertions.assertThrows(NullPointerException.class, () -> subList.removeAll(null));
+            Assertions.assertThrows(NullPointerException.class, () -> subList.removeAllAsync(null));
+            assertThat(list.readAll()).containsExactly(1, 2, 3);
+        }
+    }
+
+    @Test
+    public void testEmptySubListRetainAllRejectsNull() {
+        RList<Integer> list = redisson.getList("list");
+        list.addAll(List.of(1, 2, 3));
+        for (int index : new int[] {0, 1, 3}) {
+            RList<Integer> subList = list.subList(index, index);
+            Assertions.assertThrows(NullPointerException.class, () -> subList.retainAll(null));
+            Assertions.assertThrows(NullPointerException.class, () -> subList.retainAllAsync(null));
+            assertThat(list.readAll()).containsExactly(1, 2, 3);
+        }
+    }
+
+    @Test
+    public void testEmptySubListQueries() {
+        RList<Integer> list = redisson.getList("list");
+        list.addAll(List.of(1, 2, 3));
+        RList<Integer> subList = list.subList(0, 0);
+
+        assertThat(subList.readAll()).isEmpty();
+        assertThat(subList.contains(1)).isFalse();
+        assertThat(subList.containsAll(List.of(1))).isFalse();
+        assertThat(subList.containsAll(Collections.emptyList())).isTrue();
+        assertThat(subList.indexOf(1)).isEqualTo(-1);
+        assertThat(subList.lastIndexOf(1)).isEqualTo(-1);
+        assertThat(subList.iterator().hasNext()).isFalse();
+    }
+
+    @Test
+    public void testEmptySubListRemoveOccurrencesAsync() {
+        RList<Integer> list = redisson.getList("list");
+        list.addAll(List.of(1, 2, 3));
+        for (int index : new int[] {0, 1, 3}) {
+            RList<Integer> subList = list.subList(index, index);
+            for (int count : new int[] {0, 1, -1}) {
+                assertThat(subList.removeAsync(1, count).toCompletableFuture().join()).isFalse();
+                assertThat(list.readAll()).containsExactly(1, 2, 3);
+            }
+        }
+    }
+
+    @Test
+    public void testSubListLastIndexOf() {
+        List<Integer> list = redisson.getList("list");
+        list.add(1);
+        list.add(2);
+        list.add(3);
+        list.add(4);
+        list.add(5);
+        list.add(5);
+        list.add(6);
+        list.add(7);
+        
+        List<Integer> subList = list.subList(2, 6);
+        assertThat(subList.lastIndexOf(3)).isEqualTo(2);
+        assertThat(subList.lastIndexOf(4)).isEqualTo(3);
+        assertThat(subList.lastIndexOf(5)).isEqualTo(5);
+    }
 
     @Test
     public void testSet() {
@@ -1150,6 +1290,9 @@ public class RedissonListTest extends BaseTest {
         Assertions.assertTrue(list.containsAll(Arrays.asList(30, 11)));
         Assertions.assertFalse(list.containsAll(Arrays.asList(30, 711, 11)));
         Assertions.assertTrue(list.containsAll(Arrays.asList(30)));
+
+        Assertions.assertTrue(list.containsAll(Arrays.asList(30, 30)));
+        Assertions.assertTrue(list.containsAll(Arrays.asList(30, 11, 30)));
     }
 
     @Test
@@ -1318,5 +1461,37 @@ public class RedissonListTest extends BaseTest {
         list.add("e");
 
         assertThat(list).containsExactly(1, 2L, "3", "e");
+    }
+
+    @Test
+    public void testDistributedIterator() {
+        RList<String> list = redisson.getList("list", StringCodec.INSTANCE);
+
+        // populate list with elements
+        List<String> strings = IntStream.range(0, 128).mapToObj(i -> i + "").collect(Collectors.toList());
+        list.addAll(strings);
+
+        Iterator<String> stringIterator = list.distributedIterator("iterator_{list}", 10);
+
+        // read some elements using iterator
+        List<String> actual = new ArrayList<>();
+        for (int i = 0; i < 64; i++) {
+            if (stringIterator.hasNext()) {
+                actual.add(stringIterator.next());
+            }
+        }
+
+        // create another iterator instance using the same name
+        RList<String> set2 = redisson.getList("list", StringCodec.INSTANCE);
+        Iterator<String> stringIterator2 = set2.distributedIterator("iterator_{list}", 10);
+
+        assertTrue(stringIterator2.hasNext());
+
+        // read all remaining elements
+        stringIterator2.forEachRemaining(actual::add);
+        stringIterator.forEachRemaining(actual::add);
+
+        assertThat(actual).containsAll(strings);
+        assertThat(actual).hasSize(strings.size());
     }
 }

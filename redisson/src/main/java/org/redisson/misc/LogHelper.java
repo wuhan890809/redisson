@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,22 +15,21 @@
  */
 package org.redisson.misc;
 
-import java.lang.reflect.Array;
-import java.util.Collection;
-
+import io.netty.buffer.ByteBuf;
 import org.redisson.client.protocol.CommandData;
 import org.redisson.client.protocol.RedisCommand;
 import org.redisson.client.protocol.RedisCommands;
 
-import io.netty.buffer.ByteBuf;
+import java.lang.reflect.Array;
+import java.util.Collection;
 
 /**
  * @author Philipp Marx
  */
 public final class LogHelper {
 
-    private static final int MAX_COLLECTION_LOG_SIZE = Integer.valueOf(System.getProperty("redisson.maxCollectionLogSize", "10"));
-    private static final int MAX_STRING_LOG_SIZE = Integer.valueOf(System.getProperty("redisson.maxStringLogSize", "100"));
+    private static final int MAX_COLLECTION_LOG_SIZE = Integer.parseInt(System.getProperty("redisson.maxCollectionLogSize", "10"));
+    private static final int MAX_STRING_LOG_SIZE = Integer.parseInt(System.getProperty("redisson.maxStringLogSize", "1000"));
 //    private static final int MAX_BYTEBUF_LOG_SIZE = Integer.valueOf(System.getProperty("redisson.maxByteBufLogSize", "1000"));
 
     private LogHelper() {
@@ -38,9 +37,9 @@ public final class LogHelper {
     
     public static String toString(RedisCommand<?> command, Object... params) {
         if (RedisCommands.AUTH.equals(command)) {
-            return command + ", params: (password masked)";
+            return "command: " + command + ", params: (password masked)";
         }
-        return command + ", params: " + LogHelper.toString(params);
+        return "command: " + command + ", params: " + LogHelper.toString(params);
     }
     
     public static String toString(Object object) {
@@ -57,7 +56,7 @@ public final class LogHelper {
             if (RedisCommands.AUTH.equals(cd.getCommand())) {
                 return cd.getCommand() + ", params: (password masked)";
             }
-            return cd.getCommand() + ", params: " + LogHelper.toString(cd.getParams());
+            return cd.getCommand() + ", params: " + LogHelper.toString(cd.getParams()) + ", promise: " + cd.getPromise();
         } else if (object instanceof ByteBuf) {
             final ByteBuf byteBuf = (ByteBuf) object;
             // can't be used due to Buffer Leak error is appeared in log

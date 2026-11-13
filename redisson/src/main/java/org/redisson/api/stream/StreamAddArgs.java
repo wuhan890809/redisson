@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,50 +28,45 @@ import java.util.Map;
 public interface StreamAddArgs<K, V> {
 
     /**
-     * Define to not create stream automatically if it doesn't exist
+     * Define to not create stream automatically if it doesn't exist.
      *
      * @return arguments object
      */
     StreamAddArgs<K, V> noMakeStream();
 
     /**
-     * Defines trim strategy and threshold.
-     * Trims stream using almost exact trimming.
+     * Defines strict trimming.
      *
-     * @param strategy - trim strategy
-     * @param threshold - trim threshold
      * @return arguments object
      */
-    StreamAddArgs<K, V> trim(TrimStrategy strategy, int threshold);
+    StreamTrimStrategyArgs<StreamAddArgs<K, V>> trim();
 
     /**
-     * Defines trim strategy, threshold and limit.
-     * Trims stream using almost exact trimming threshold up to limit.
+     * Defines non-strict trimming.
      *
-     * @param strategy - trim strategy
-     * @param threshold - trim threshold
-     * @param limit - trim limit
      * @return arguments object
      */
-    StreamAddArgs<K, V> trim(TrimStrategy strategy, int threshold, int limit);
+    StreamTrimStrategyArgs<StreamAddArgs<K, V>> trimNonStrict();
 
     /**
-     * Defines trim strategy and threshold.
-     * Trims stream using strict trimming.
+     * Defines idempotent message production for the given producer.
+     * Prevents duplicate entries when a producer resends a message
+     * after a network error or crash.
+     * <p>
+     * Requires <b>Redis 8.6.0 and higher.</b>
      *
-     * @param strategy - trim strategy
-     * @param threshold - trim threshold
+     * @param producerId - unique producer identifier
      * @return arguments object
      */
-    StreamAddArgs<K, V> trimStrict(TrimStrategy strategy, int threshold);
+    StreamIdempotentArgs<StreamAddArgs<K, V>> idempotentProducerId(String producerId);
 
     /**
      * Defines entry to add
      *
-     * @param k1 - key to add
-     * @param v1 - value to add
-     * @param <K> - key type
-     * @param <V> - value type
+     * @param k1 key to add
+     * @param v1 value to add
+     * @param <K> key type
+     * @param <V> value type
      * @return arguments object
      */
     static <K, V> StreamAddArgs<K, V> entry(K k1, V v1) {
@@ -81,12 +76,12 @@ public interface StreamAddArgs<K, V> {
     /**
      * Defines entries to add
      *
-     * @param k1 - 1st key to add
-     * @param v1 - 1st value to add
-     * @param k2 - 2nd key to add
-     * @param v2 - 2nd value to add
-     * @param <K> - key type
-     * @param <V> - value type
+     * @param k1 1st key to add
+     * @param v1 1st value to add
+     * @param k2 2nd key to add
+     * @param v2 2nd value to add
+     * @param <K> key type
+     * @param <V> value type
      * @return arguments object
      */
     static <K, V> StreamAddArgs<K, V> entries(K k1, V v1, K k2, V v2) {
@@ -99,14 +94,14 @@ public interface StreamAddArgs<K, V> {
     /**
      * Defines entries to add
      *
-     * @param k1 - 1st key to add
-     * @param v1 - 1st value to add
-     * @param k2 - 2nd key to add
-     * @param v2 - 2nd value to add
-     * @param k3 - 3rd key to add
-     * @param v3 - 3rd value to add
-     * @param <K> - key type
-     * @param <V> - value type
+     * @param k1 1st key to add
+     * @param v1 1st value to add
+     * @param k2 2nd key to add
+     * @param v2 2nd value to add
+     * @param k3 3rd key to add
+     * @param v3 3rd value to add
+     * @param <K> key type
+     * @param <V> value type
      * @return arguments object
      */
     static <K, V> StreamAddArgs<K, V> entries(K k1, V v1, K k2, V v2, K k3, V v3) {
@@ -120,16 +115,16 @@ public interface StreamAddArgs<K, V> {
     /**
      * Defines entries to add
      *
-     * @param k1 - 1st key to add
-     * @param v1 - 1st value to add
-     * @param k2 - 2nd key to add
-     * @param v2 - 2nd value to add
-     * @param k3 - 3rd key to add
-     * @param v3 - 3rd value to add
-     * @param k4 - 4th key to add
-     * @param v4 - 4th key to add
-     * @param <K> - key type
-     * @param <V> - value type
+     * @param k1 1st key to add
+     * @param v1 1st value to add
+     * @param k2 2nd key to add
+     * @param v2 2nd value to add
+     * @param k3 3rd key to add
+     * @param v3 3rd value to add
+     * @param k4 4th key to add
+     * @param v4 4th key to add
+     * @param <K> key type
+     * @param <V> value type
      * @return arguments object
      */
     static <K, V> StreamAddArgs<K, V> entries(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4) {
@@ -144,18 +139,18 @@ public interface StreamAddArgs<K, V> {
     /**
      * Defines entries to add
      *
-     * @param k1 - 1st key to add
-     * @param v1 - 1st value to add
-     * @param k2 - 2nd key to add
-     * @param v2 - 2nd value to add
-     * @param k3 - 3rd key to add
-     * @param v3 - 3rd value to add
-     * @param k4 - 4th key to add
-     * @param v4 - 4th key to add
-     * @param k5 - 5th key to add
-     * @param v5 - 5th key to add
-     * @param <K> - key type
-     * @param <V> - value type
+     * @param k1 1st key to add
+     * @param v1 1st value to add
+     * @param k2 2nd key to add
+     * @param v2 2nd value to add
+     * @param k3 3rd key to add
+     * @param v3 3rd value to add
+     * @param k4 4th key to add
+     * @param v4 4th key to add
+     * @param k5 5th key to add
+     * @param v5 5th key to add
+     * @param <K> key type
+     * @param <V> value type
      * @return arguments object
      */
     static <K, V> StreamAddArgs<K, V> entries(K k1, V v1, K k2, V v2, K k3, V v3, K k4, V v4, K k5, V v5) {
@@ -171,13 +166,13 @@ public interface StreamAddArgs<K, V> {
     /**
      * Defines entries to add
      *
-     * @param entries - entries map to add
-     * @param <K> - key type
-     * @param <V> - value type
+     * @param entries entries map to add
+     * @param <K> key type
+     * @param <V> value type
      * @return arguments object
      */
     static <K, V> StreamAddArgs<K, V> entries(Map<K, V> entries) {
-        return new BaseStreamAddArgs<K, V>(entries);
+        return new StreamAddParams<K, V>(entries);
     }
 
 }

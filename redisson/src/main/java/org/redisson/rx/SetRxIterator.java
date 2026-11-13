@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,15 +15,11 @@
  */
 package org.redisson.rx;
 
-import java.util.concurrent.atomic.AtomicLong;
-
+import io.reactivex.rxjava3.core.Flowable;
+import io.reactivex.rxjava3.processors.ReplayProcessor;
+import org.redisson.ScanResult;
 import org.redisson.api.RFuture;
 import org.redisson.client.RedisClient;
-import org.redisson.client.protocol.decoder.ListScanResult;
-
-import io.reactivex.rxjava3.core.Flowable;
-import io.reactivex.rxjava3.functions.LongConsumer;
-import io.reactivex.rxjava3.processors.ReplayProcessor;
 
 /**
  * 
@@ -35,62 +31,15 @@ public abstract class SetRxIterator<V> {
 
     public Flowable<V> create() {
         ReplayProcessor<V> p = ReplayProcessor.create();
-        return p.doOnRequest(new LongConsumer() {
-            
-            private long nextIterPos;
-            private RedisClient client;
-            private AtomicLong elementsRead = new AtomicLong();
-            
-            private boolean finished;
-            private volatile boolean completed;
-            private AtomicLong readAmount = new AtomicLong();
-            
+        return p.doOnRequest(new RxIteratorConsumer<V>(p) {
             @Override
-            public void accept(long value) {
-                readAmount.addAndGet(value);
-                if (completed || elementsRead.get() == 0) {
-                    nextValues();
-                    completed = false;
-                }
+            protected boolean tryAgain() {
+                return SetRxIterator.this.tryAgain();
             }
-            
-            protected void nextValues() {
-                scanIterator(client, nextIterPos).onComplete((res, e) -> {
-                    if (e != null) {
-                        p.onError(e);
-                        return;
-                    }
-                    
-                    if (finished) {
-                        client = null;
-                        nextIterPos = 0;
-                        return;
-                    }
 
-                    client = res.getRedisClient();
-                    nextIterPos = res.getPos();
-
-                    for (Object val : res.getValues()) {
-                        p.onNext((V) val);
-                        elementsRead.incrementAndGet();
-                    }
-                    
-                    if (elementsRead.get() >= readAmount.get()) {
-                        p.onComplete();
-                        elementsRead.set(0);
-                        completed = true;
-                        return;
-                    }
-                    if (res.getPos() == 0 && !tryAgain()) {
-                        finished = true;
-                        p.onComplete();
-                    }
-                    
-                    if (finished || completed) {
-                        return;
-                    }
-                    nextValues();
-                });
+            @Override
+            protected RFuture<ScanResult<Object>> scanIterator(RedisClient client, String nextIterPos) {
+                return SetRxIterator.this.scanIterator(client, nextIterPos);
             }
         });
     }
@@ -99,6 +48,6 @@ public abstract class SetRxIterator<V> {
         return false;
     }
 
-    protected abstract RFuture<ListScanResult<Object>> scanIterator(RedisClient client, long nextIterPos);
+    protected abstract RFuture<ScanResult<Object>> scanIterator(RedisClient client, String nextIterPos);
 
 }

@@ -1,17 +1,134 @@
 package org.redisson;
 
+import java.time.Instant;
+import java.util.concurrent.TimeUnit;
+import org.awaitility.Awaitility;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.redisson.api.RBucketReactive;
-import org.redisson.api.RKeysReactive;
-import org.redisson.api.RMapReactive;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import org.redisson.api.*;
+import org.redisson.client.protocol.Time;
+import org.testcontainers.containers.GenericContainer;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.Iterator;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class RedissonKeysReactiveTest extends BaseReactiveTest {
+
+    @Test
+    public void testTime() {
+        Time time = sync(redisson.getKeys().time());
+
+        assertThat(time.getSeconds()).isPositive();
+        assertThat(time.getMicroseconds()).isBetween(0, 999999);
+    }
+
+    private static GenericContainer<?> redis812;
+    private static RedissonClient redisson812;
+
+    @BeforeAll
+    static void startRedis812() {
+        redis812 = createRedis812();
+        redis812.start();
+        redisson812 = Redisson.create(createConfig(redis812));
+    }
+
+    @AfterAll
+    static void stopRedis812() {
+        redisson812.shutdown();
+        redis812.stop();
+    }
+
+    @Test
+    public void testBlessReactiveAndRx() {
+        redisson812.getKeys().flushall();
+        redisson812.getBucket("testBlessReactive").set("v");
+
+        RKeysReactive reactive = redisson812.reactive().getKeys();
+        assertThat(reactive.bless("testBlessReactive").block()).isTrue();
+        assertThat(reactive.isBlessed("testBlessReactive").block()).isTrue();
+
+        assertThat(reactive.getBlessedKeys().collectList().block())
+                .containsExactlyInAnyOrder("testBlessReactive");
+        assertThat(reactive.getBlessedKeys(1).collectList().block())
+                .containsExactlyInAnyOrder("testBlessReactive");
+
+        assertThat(reactive.unbless("testBlessReactive").block()).isTrue();
+        assertThat(reactive.getBlessedKeys().collectList().block()).isEmpty();
+    }
+
+    @Test
+    public void testKeysByPatternIterator() {
+        for (int i = 0; i < 100; i++) {
+            redisson.getBucket("key" + i).set(1).block();
+        }
+
+        Flux<String> p = redisson.getKeys().getKeysByPattern(null);
+        AtomicInteger i = new AtomicInteger();
+        p.doOnNext(t -> {
+            i.incrementAndGet();
+        }).doOnSubscribe(s -> {
+            s.request(100);
+        }).subscribe();
+
+        Awaitility.await().atMost(Duration.ofSeconds(1)).untilAsserted(() -> {
+            assertThat(i.get()).isEqualTo(100);
+        });
+    }
+
+    @Test
+    public void testKeysByPatternIteratorWithSlowConsumer() throws InterruptedException {
+        int noOfKeys = 1200;
+        for (int i = 0; i < noOfKeys; i++) {
+            redisson.getBucket("key" + i).set(1).block();
+        }
+
+        Flux<String> p = redisson.getKeys().getKeysByPattern(null)
+                .flatMap(string -> Mono.just(string)
+                        .delayElement(Duration.ofMillis(10)));
+        AtomicInteger i = new AtomicInteger();
+        p.doOnNext(t -> {
+            i.incrementAndGet();
+        }).blockLast();
+        assertThat(i.get()).isEqualTo(noOfKeys);
+        i.set(0);
+
+        Flux<String> pp = redisson.getKeys().getKeysByPattern(null);
+
+        pp.doOnNext(t -> {
+            i.incrementAndGet();
+        }).subscribeWith(new Subscriber() {
+
+            @Override
+            public void onSubscribe(Subscription s) {
+                s.request(10);
+            }
+
+            @Override
+            public void onNext(Object o) {
+
+            }
+
+            @Override
+            public void onError(Throwable t) {
+
+            }
+
+            @Override
+            public void onComplete() {
+            }
+        });
+        Thread.sleep(100);
+        assertThat(i.get()).isEqualTo(10);
+    }
 
     @Test
     public void testGetKeys() {
@@ -65,6 +182,16 @@ public class RedissonKeysReactiveTest extends BaseReactiveTest {
     }
 
     @Test
+    public void testUnlinkByPattern() {
+        RBucketReactive<String> bucket = redisson.getBucket("test1");
+        sync(bucket.set("someValue"));
+        RMapReactive<String, String> map = redisson.getMap("test2");
+        sync(map.fastPut("1", "2"));
+
+        Assertions.assertEquals(2, sync(redisson.getKeys().unlinkByPattern("test?")).intValue());
+    }
+
+    @Test
     public void testMassDelete() {
         RBucketReactive<String> bucket = redisson.getBucket("test");
         sync(bucket.set("someValue"));
@@ -75,4 +202,34 @@ public class RedissonKeysReactiveTest extends BaseReactiveTest {
         Assertions.assertEquals(0, sync(redisson.getKeys().delete("test", "map2")).intValue());
     }
 
+    @Test
+    public void testExpire() {
+        Long s = sync(redisson.getKeys().count());
+        assertThat(s).isEqualTo(0);
+
+        sync(redisson.getBucket("expire-test1").set(23, Duration.ofHours(1)));
+        sync(redisson.getBucket("expire-test2").set(23, Duration.ofHours(1)));
+        s = sync(redisson.getKeys().expire(Duration.ofDays(1), new String[]{"expire-test1", "expire-test2"}));
+        assertThat(s).isEqualTo(2);
+
+        long ttl1 = sync(redisson.getBucket("expire-test1").remainTimeToLive());
+        long ttl2 = sync(redisson.getBucket("expire-test2").remainTimeToLive());
+        assertThat(ttl1).isGreaterThan(TimeUnit.HOURS.toMillis(23));
+        assertThat(ttl2).isGreaterThan(TimeUnit.HOURS.toMillis(23));
+
+        long ts = System.currentTimeMillis() + TimeUnit.DAYS.toMillis(2);
+        s = sync(redisson.getKeys().expireAt(Instant.ofEpochMilli(ts), "expire-test1", "expire-test2"));
+        assertThat(s).isEqualTo(2);
+
+        ttl1 = sync(redisson.getBucket("expire-test1").remainTimeToLive());
+        assertThat(ttl1).isGreaterThan(TimeUnit.DAYS.toMillis(1));
+        ttl2 = sync(redisson.getBucket("expire-test2").remainTimeToLive());
+        assertThat(ttl2).isGreaterThan(TimeUnit.DAYS.toMillis(1));
+
+        s = sync(redisson.getKeys().expire(Duration.ofDays(1), "expire-miss"));
+        assertThat(s).isEqualTo(0);
+
+        s = sync(redisson.getKeys().expireAt(Instant.ofEpochMilli(ts), "expire-miss"));
+        assertThat(s).isEqualTo(0);
+    }
 }

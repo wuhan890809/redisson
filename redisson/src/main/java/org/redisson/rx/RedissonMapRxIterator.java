@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,13 +17,13 @@ package org.redisson.rx;
 
 import java.util.AbstractMap;
 import java.util.Map.Entry;
-import java.util.concurrent.atomic.AtomicLong;
 
 import org.redisson.RedissonMap;
+import org.redisson.ScanResult;
+import org.redisson.api.RFuture;
 import org.redisson.client.RedisClient;
 
 import io.reactivex.rxjava3.core.Flowable;
-import io.reactivex.rxjava3.functions.LongConsumer;
 import io.reactivex.rxjava3.processors.ReplayProcessor;
 
 /**
@@ -48,65 +48,21 @@ public class RedissonMapRxIterator<K, V, M> {
     
     public Flowable<M> create() {
         ReplayProcessor<M> p = ReplayProcessor.create();
-        return p.doOnRequest(new LongConsumer() {
-
-            private long nextIterPos;
-            private RedisClient client;
-            private AtomicLong elementsRead = new AtomicLong();
-            
-            private boolean finished;
-            private volatile boolean completed;
-            private AtomicLong readAmount = new AtomicLong();
-            
+        return p.doOnRequest(new RxIteratorConsumer<M>(p) {
             @Override
-            public void accept(long value) throws Exception {
-                readAmount.addAndGet(value);
-                if (completed || elementsRead.get() == 0) {
-                    nextValues();
-                    completed = false;
-                }
-            };
-            
-            protected void nextValues() {
-                map.scanIteratorAsync(map.getRawName(), client, nextIterPos, pattern, count).onComplete((res, e) -> {
-                    if (e != null) {
-                        p.onError(e);
-                        return;
-                    }
-
-                    if (finished) {
-                        client = null;
-                        nextIterPos = 0;
-                        return;
-                    }
-
-                    client = res.getRedisClient();
-                    nextIterPos = res.getPos();
-                    
-                    for (Entry<Object, Object> entry : res.getMap().entrySet()) {
-                        M val = getValue(entry);
-                        p.onNext(val);
-                        elementsRead.incrementAndGet();
-                    }
-                    
-                    if (elementsRead.get() >= readAmount.get()) {
-                        p.onComplete();
-                        elementsRead.set(0);
-                        completed = true;
-                        return;
-                    }
-                    if (res.getPos() == 0 && !tryAgain()) {
-                        finished = true;
-                        p.onComplete();
-                    }
-                    
-                    if (finished || completed) {
-                        return;
-                    }
-                    nextValues();
-                });
+            protected Object transformValue(Object value) {
+                return getValue((Entry<Object, Object>) value);
             }
-            
+
+            @Override
+            protected boolean tryAgain() {
+                return RedissonMapRxIterator.this.tryAgain();
+            }
+
+            @Override
+            protected RFuture<ScanResult<Object>> scanIterator(RedisClient client, String nextIterPos) {
+                return (RFuture<ScanResult<Object>>) (Object) map.scanIteratorAsync(map.getRawName(), client, nextIterPos, pattern, count);
+            }
         });
     }
 

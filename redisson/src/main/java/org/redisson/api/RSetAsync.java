@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package org.redisson.api;
 
+import java.util.Collection;
 import java.util.Set;
 
 /**
@@ -95,6 +96,52 @@ public interface RSetAsync<V> extends RCollectionAsync<V>, RSortableAsync<Set<V>
     RFuture<Set<V>> readUnionAsync(String... names);
 
     /**
+     * Counts elements of set as a result of sets union with current set.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return amount of elements
+     */
+    RFuture<Integer> countUnionAsync(String... names);
+
+    /**
+     * Counts elements of set as a result of sets union with current set.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @param limit - sets union limit
+     * @return amount of elements
+     */
+    RFuture<Integer> countUnionAsync(int limit, String... names);
+
+    /**
+     * Counts elements of set as a result of sets union with current set.
+     * Returns an approximate value computed through HyperLogLog with
+     * 0.81% standard error instead of an exact one.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return approximate amount of elements
+     */
+    RFuture<Integer> countUnionApproxAsync(String... names);
+
+    /**
+     * Counts elements of set as a result of sets union with current set.
+     * Returns an approximate value computed through HyperLogLog with
+     * 0.81% standard error instead of an exact one.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @param limit - sets union limit
+     * @return approximate amount of elements
+     */
+    RFuture<Integer> countUnionApproxAsync(int limit, String... names);
+
+    /**
      * Diff sets specified by name and write to current set.
      * If current set already exists, it is overwritten.
      *
@@ -111,6 +158,27 @@ public interface RSetAsync<V> extends RCollectionAsync<V>, RSortableAsync<Set<V>
      * @return values
      */
     RFuture<Set<V>> readDiffAsync(String... names);
+
+    /**
+     * Counts elements of set as a result of sets difference with current set.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return amount of elements
+     */
+    RFuture<Integer> countDiffAsync(String... names);
+
+    /**
+     * Counts elements of set as a result of sets difference with current set.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @param limit - sets difference limit
+     * @return amount of elements
+     */
+    RFuture<Integer> countDiffAsync(int limit, String... names);
 
     /**
      * Intersection sets specified by name and write to current set.
@@ -131,6 +199,27 @@ public interface RSetAsync<V> extends RCollectionAsync<V>, RSortableAsync<Set<V>
     RFuture<Set<V>> readIntersectionAsync(String... names);
 
     /**
+     * Counts elements of set as a result of sets intersection with current set.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return amount of elements
+     */
+    RFuture<Integer> countIntersectionAsync(String... names);
+
+    /**
+     * Counts elements of set as a result of sets intersection with current set.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @param limit - sets intersection limit
+     * @return amount of elements
+     */
+    RFuture<Integer> countIntersectionAsync(int limit, String... names);
+
+    /**
      * Tries to add elements only if none of them in set.
      *
      * @param values - values to add
@@ -138,5 +227,66 @@ public interface RSetAsync<V> extends RCollectionAsync<V>, RSortableAsync<Set<V>
      *          otherwise <code>false</code>.
      */
     RFuture<Boolean> tryAddAsync(V... values);
+
+    /**
+     * Adds all elements contained in the specified collection.
+     * Returns number of added elements.
+     *
+     * @param c - collection of elements to add
+     * @return number of added elements
+     */
+    RFuture<Integer> addAllCountedAsync(Collection<? extends V> c);
+
+    /**
+     * Removes all elements contained in the specified collection.
+     * Returns number of removed elements.
+     *
+     * @param c - collection of elements to add
+     * @return number of removed elements
+     */
+    RFuture<Integer> removeAllCountedAsync(Collection<? extends V> c);
+
+    /**
+     * Check if each element is contained in the specified collection.
+     * Returns contained elements.
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param c - collection to check
+     * @return contained elements
+     */
+    RFuture<Set<V>> containsEachAsync(Collection<V> c);
+
+    /**
+     * Adds object event listener
+     *
+     * @see org.redisson.api.listener.TrackingListener
+     * @see org.redisson.api.listener.SetAddListener
+     * @see org.redisson.api.listener.SetRemoveListener
+     * @see org.redisson.api.listener.SetRemoveRandomListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
+     *
+     * @param listener - object event listener
+     * @return listener id
+     */
+    RFuture<Integer> addListenerAsync(ObjectListener listener);
+
+    /**
+     * Returns elements iterator fetches elements in a batch.
+     * Batch size is defined by <code>count</code> param.
+     *
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<V> iteratorAsync();
+
+    /**
+     * Returns elements iterator fetches elements in a batch.
+     * Batch size is defined by <code>count</code> param.
+     *
+     * @param count - size of elements batch
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<V> iteratorAsync(int count);
 
 }

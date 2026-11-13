@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,10 +15,7 @@
  */
 package org.redisson.api.stream;
 
-import org.redisson.api.StreamMessageId;
-
 import java.time.Duration;
-import java.util.Collections;
 
 /**
  * Arguments object for RStream.readGroup() methods.
@@ -27,6 +24,14 @@ import java.util.Collections;
  *
  */
 public interface StreamReadGroupArgs {
+
+    /**
+     * Defines claim messages which have been pending for at least the minimal idle time.
+     *
+     * @param minIdle minimal idle time
+     * @return arguments object
+     */
+    StreamReadGroupArgs claim(Duration minIdle);
 
     /**
      * Defines avoid of adding messages to Pending Entries List.
@@ -38,15 +43,36 @@ public interface StreamReadGroupArgs {
     /**
      * Defines stream data size limit.
      *
-     * @param count - stream data size limit
+     * @param count stream data size limit
      * @return arguments object
      */
     StreamReadGroupArgs count(int count);
 
     /**
-     * Defines time interval to wait for stream data availability.
+     * Defines the total limit of entries returned in the command reply.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
      *
-     * @param timeout - timeout duration
+     * @param maxCount total entries limit
+     * @return arguments object
+     */
+    StreamReadGroupArgs maxCount(int maxCount);
+
+    /**
+     * Defines the total size limit in bytes of entries returned in the command reply.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param maxSize total entries size limit in bytes
+     * @return arguments object
+     */
+    StreamReadGroupArgs maxSize(long maxSize);
+
+    /**
+     * Defines time interval to wait for stream data availability.
+     * <code>0</code> is used to wait infinitely.
+     *
+     * @param timeout timeout duration
      * @return arguments object
      */
     StreamReadGroupArgs timeout(Duration timeout);
@@ -65,11 +91,11 @@ public interface StreamReadGroupArgs {
      * Defines to return messages of current Stream
      * with ids greater than defined message id.
      *
-     * @param id - message id
+     * @param id message id
      * @return arguments object
      */
     static StreamReadGroupArgs greaterThan(StreamMessageId id) {
-        return new BaseStreamReadGroupArgs(id, Collections.emptyMap());
+        return new StreamReadGroupParams(id);
     }
 
 }

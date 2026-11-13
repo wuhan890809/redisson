@@ -3,11 +3,86 @@ package org.redisson;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RAtomicLong;
+import org.redisson.api.atomic.CompareAndDeleteArgs;
+import org.redisson.api.atomic.LongIncrementArgs;
+
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class RedissonAtomicLongTest extends BaseTest {
+public class RedissonAtomicLongTest extends RedisDockerTest {
 
+    @Test
+    public void testCompareAndDelete() {
+        RAtomicLong al = redisson.getAtomicLong("test");
+        al.set(10);
+
+        // less - value is 10, threshold is 5, 10 < 5 is false
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.less(5))).isFalse();
+        assertThat(al.isExists()).isTrue();
+        // less - value is 10, threshold is 15, 10 < 15 is true
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.less(15))).isTrue();
+        assertThat(al.isExists()).isFalse();
+
+        // lessOrEqual
+        al.set(10);
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.lessOrEqual(9))).isFalse();
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.lessOrEqual(10))).isTrue();
+        assertThat(al.isExists()).isFalse();
+
+        // greater - value is 10, threshold is 15, 10 > 15 is false
+        al.set(10);
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.greater(15))).isFalse();
+        assertThat(al.isExists()).isTrue();
+        // greater - value is 10, threshold is 5, 10 > 5 is true
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.greater(5))).isTrue();
+        assertThat(al.isExists()).isFalse();
+
+        // greaterOrEqual
+        al.set(10);
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.greaterOrEqual(11))).isFalse();
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.greaterOrEqual(10))).isTrue();
+        assertThat(al.isExists()).isFalse();
+
+        // equal
+        al.set(10);
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.equal(11))).isFalse();
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.equal(10))).isTrue();
+        assertThat(al.isExists()).isFalse();
+
+        // notEqual
+        al.set(10);
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.notEqual(10))).isFalse();
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.notEqual(11))).isTrue();
+        assertThat(al.isExists()).isFalse();
+
+        // non-existent key - nothing to delete
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.equal(0))).isFalse();
+        assertThat(al.compareAndDelete(CompareAndDeleteArgs.less(0))).isFalse();
+    }
+
+    @Test
+    public void testSetIfLess() {
+        RAtomicLong al = redisson.getAtomicLong("test");
+        assertThat(al.setIfLess(0, 1)).isFalse();
+        assertThat(al.get()).isEqualTo(0);
+        
+        al.set(12);
+        assertThat(al.setIfLess(13, 1)).isTrue();
+        assertThat(al.get()).isEqualTo(1);
+    }
+    
+    @Test
+    public void testSetIfGreater() {
+        RAtomicLong al = redisson.getAtomicLong("test");
+        assertThat(al.setIfLess(0, 1)).isFalse();
+        assertThat(al.get()).isEqualTo(0);
+        
+        al.set(12);
+        assertThat(al.setIfGreater(11, 1)).isTrue();
+        assertThat(al.get()).isEqualTo(1);
+    }
+    
     @Test
     public void testGetAndSet() {
         RAtomicLong al = redisson.getAtomicLong("test");
@@ -67,6 +142,36 @@ public class RedissonAtomicLongTest extends BaseTest {
         RAtomicLong al = redisson.getAtomicLong("test");
         Assertions.assertEquals(1, al.incrementAndGet());
         Assertions.assertEquals(1, al.get());
+    }
+
+    @Test
+    public void testIncrementAndGetArgs() {
+        RAtomicLong al = redisson.getAtomicLong("test");
+
+        assertThat(al.incrementAndGet(LongIncrementArgs.by(10))).isEqualTo(10);
+        assertThat(al.incrementAndGet(LongIncrementArgs.by(5).upperBound(12).saturate())).isEqualTo(12);
+        assertThat(al.incrementAndGet(LongIncrementArgs.by(5).upperBound(12))).isEqualTo(12);
+        assertThat(al.get()).isEqualTo(12);
+        assertThat(al.incrementAndGet(LongIncrementArgs.by(-20).lowerBound(0).saturate())).isZero();
+    }
+
+    @Test
+    public void testIncrementAndGetArgsExpiration() {
+        RAtomicLong al = redisson.getAtomicLong("test");
+
+        assertThat(al.incrementAndGet(LongIncrementArgs.defaults()
+                .timeToLive(Duration.ofSeconds(10))
+                .expireIfNotSet())).isEqualTo(1);
+        long ttl = al.remainTimeToLive();
+        assertThat(ttl).isGreaterThan(0);
+
+        assertThat(al.incrementAndGet(LongIncrementArgs.defaults()
+                .timeToLive(Duration.ofSeconds(60))
+                .expireIfNotSet())).isEqualTo(2);
+        assertThat(al.remainTimeToLive()).isLessThanOrEqualTo(ttl);
+
+        assertThat(al.incrementAndGet(LongIncrementArgs.defaults().persist())).isEqualTo(3);
+        assertThat(al.remainTimeToLive()).isEqualTo(-1);
     }
 
     @Test

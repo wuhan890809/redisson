@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,6 +58,26 @@ public class RedissonPriorityDeque<V> extends RedissonPriorityQueue<V> implement
 
     @Override
     public int addLastIfExists(V... elements) {
+        throw new UnsupportedOperationException("use add or put method");
+    }
+
+    @Override
+    public int addFirst(V... elements) {
+        throw new UnsupportedOperationException("use add or put method");
+    }
+
+    @Override
+    public int addLast(V... elements) {
+        throw new UnsupportedOperationException("use add or put method");
+    }
+
+    @Override
+    public RFuture<Integer> addFirstAsync(V... elements) {
+        throw new UnsupportedOperationException("use add or put method");
+    }
+
+    @Override
+    public RFuture<Integer> addLastAsync(V... elements) {
         throw new UnsupportedOperationException("use add or put method");
     }
 
@@ -284,7 +304,7 @@ public class RedissonPriorityDeque<V> extends RedissonPriorityQueue<V> implement
     @Override
     public RFuture<List<V>> pollLastAsync(int limit) {
         return wrapLockedAsync(() -> {
-            return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_LIST,
+            return commandExecutor.evalWriteNoRetryAsync(getRawName(), codec, RedisCommands.EVAL_LIST,
                       "local result = {};"
                           + "for i = 1, ARGV[1], 1 do " +
                                 "local value = redis.call('rpop', KEYS[1]);" +
@@ -308,4 +328,5 @@ public class RedissonPriorityDeque<V> extends RedissonPriorityQueue<V> implement
     public RFuture<V> moveAsync(DequeMoveArgs args) {
         throw new UnsupportedOperationException();
     }
+
 }

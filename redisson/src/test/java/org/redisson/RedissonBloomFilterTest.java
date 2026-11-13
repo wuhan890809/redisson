@@ -3,10 +3,63 @@ package org.redisson;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RBloomFilter;
+import org.redisson.client.RedisException;
+
+import java.time.Instant;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class RedissonBloomFilterTest extends BaseTest {
+public class RedissonBloomFilterTest extends RedisDockerTest {
+
+    @Test
+    public void testContainsAll() {
+        RBloomFilter<String> filter = redisson.getBloomFilter("filter");
+        filter.tryInit(100, 0.03);
+
+        List<String> list = Arrays.asList("1", "2", "3");
+        assertThat(filter.contains(list)).isEqualTo(0);
+        assertThat(filter.add(list)).isEqualTo(3);
+        assertThat(filter.contains(list)).isEqualTo(3);
+        assertThat(filter.contains(Arrays.asList("1", "5"))).isEqualTo(1);
+    }
+
+    @Test
+    public void testExistsAll() {
+        RBloomFilter<String> filter = redisson.getBloomFilter("filter");
+        filter.tryInit(100, 0.03);
+
+        List<String> list = Arrays.asList("1", "2", "3");
+        assertThat(filter.exists(list).size()).isEqualTo(0);
+
+        assertThat(filter.add(list)).isEqualTo(3);
+        assertThat(filter.exists(list).size()).isEqualTo(3);
+
+        Set<String> allExists = filter.exists(list);
+        assertThat(allExists).isEqualTo(Set.of("1", "2", "3"));
+
+        Set<String> partialExists = filter.exists(Arrays.asList("1", "5"));
+        assertThat(partialExists).isEqualTo(Set.of("1"));
+    }
+
+    @Test
+    public void testAddAll() {
+        RBloomFilter<String> filter = redisson.getBloomFilter("filter");
+        filter.tryInit(100, 0.03);
+
+        List<String> list = Arrays.asList("1", "2", "3");
+        assertThat(filter.add(list)).isEqualTo(3);
+        assertThat(filter.add(list)).isZero();
+        assertThat(filter.count()).isEqualTo(3);
+        assertThat(filter.add(Arrays.asList("1", "5"))).isEqualTo(1);
+        assertThat(filter.count()).isEqualTo(4);
+        for (String s : list) {
+            assertThat(filter.contains(s)).isTrue();
+        }
+
+    }
 
     @Test
     public void testFalseProbability1() {
@@ -56,7 +109,7 @@ public class RedissonBloomFilterTest extends BaseTest {
 
     @Test
     public void testNotInitializedOnExpectedInsertions() {
-        Assertions.assertThrows(IllegalStateException.class, () -> {
+        Assertions.assertThrows(RedisException.class, () -> {
             RBloomFilter<String> filter = redisson.getBloomFilter("filter");
             filter.getExpectedInsertions();
         });
@@ -64,16 +117,21 @@ public class RedissonBloomFilterTest extends BaseTest {
     }
 
     @Test
-    public void testNotInitializedOnContains() {
-        Assertions.assertThrows(IllegalStateException.class, () -> {
-            RBloomFilter<String> filter = redisson.getBloomFilter("filter");
-            filter.contains("32");
-        });
+    public void testExpire() throws InterruptedException {
+        RBloomFilter<String> filter = redisson.getBloomFilter("filter");
+        filter.tryInit(55000000L, 0.03);
+
+        filter.add("test");
+        filter.expire(Instant.now().plusSeconds(2));
+
+        Thread.sleep(2100);
+
+        assertThat(redisson.getKeys().count()).isZero();
     }
 
     @Test
     public void testNotInitializedOnAdd() {
-        Assertions.assertThrows(IllegalStateException.class, () -> {
+        Assertions.assertThrows(RedisException.class, () -> {
             RBloomFilter<String> filter = redisson.getBloomFilter("filter");
             filter.add("123");
         });
@@ -91,8 +149,14 @@ public class RedissonBloomFilterTest extends BaseTest {
     @Test
     public void test() {
         RBloomFilter<String> filter = redisson.getBloomFilter("filter");
-        filter.tryInit(550000000L, 0.03);
+        filter.tryInit(550000000L, 0.5);
+        test(filter);
+        filter.delete();
+        assertThat(filter.tryInit(550000000L, 0.03)).isTrue();
+        test(filter);
+    }
 
+    private void test(RBloomFilter<String> filter) {
         assertThat(filter.contains("123")).isFalse();
         assertThat(filter.add("123")).isTrue();
         assertThat(filter.contains("123")).isTrue();
@@ -140,5 +204,18 @@ public class RedissonBloomFilterTest extends BaseTest {
         RBloomFilter<String> newFilter = redisson.getBloomFilter("new_filter");
         assertThat(newFilter.count()).isEqualTo(1);
         assertThat(newFilter.contains("123")).isTrue();
+    }
+
+    @Test
+    public void testContainsException() {
+        RBloomFilter<String> f1 = redisson.getBloomFilter("filter");
+        assertThat(f1.contains("1")).isFalse();
+        f1.tryInit(100, 0.03);
+
+        RBloomFilter<String> f2 = redisson.getBloomFilter("filter");
+        f2.delete();
+        f2.tryInit(200, 0.03);
+
+        assertThat(f1.contains("1")).isFalse();
     }
 }

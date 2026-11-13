@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,9 +35,14 @@ public class TaskParameters implements Serializable {
 
     public TaskParameters() {
     }
-    
-    public TaskParameters(String className, byte[] classBody, byte[] lambdaBody, byte[] state) {
+
+    public TaskParameters(String requestId) {
+        this.requestId = requestId;
+    }
+
+    public TaskParameters(String requestId, String className, byte[] classBody, byte[] lambdaBody, byte[] state) {
         super();
+        this.requestId = requestId;
         this.className = className;
         this.classBody = classBody;
         this.state = state;
@@ -85,5 +90,12 @@ public class TaskParameters implements Serializable {
     public void setRequestId(String requestId) {
         this.requestId = requestId;
     }
-    
+
+    @Override
+    public String toString() {
+        return "TaskParameters{" +
+                "className='" + className + '\'' +
+                ", requestId='" + requestId + '\'' +
+                '}';
+    }
 }

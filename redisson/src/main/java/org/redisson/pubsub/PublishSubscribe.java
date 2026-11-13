@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,16 +16,13 @@
 package org.redisson.pubsub;
 
 import org.redisson.PubSubEntry;
-import org.redisson.api.RFuture;
 import org.redisson.client.BaseRedisPubSubListener;
 import org.redisson.client.ChannelName;
 import org.redisson.client.RedisPubSubListener;
 import org.redisson.client.codec.LongCodec;
-import org.redisson.client.protocol.pubsub.PubSubType;
-import org.redisson.misc.RPromise;
-import org.redisson.misc.RedissonPromise;
-import org.redisson.misc.TransferListener;
+import org.redisson.misc.AsyncSemaphore;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -45,61 +42,98 @@ abstract class PublishSubscribe<E extends PubSubEntry<E>> {
     }
 
     public void unsubscribe(E entry, String entryName, String channelName) {
-        AsyncSemaphore semaphore = service.getSemaphore(new ChannelName(channelName));
-        semaphore.acquire(() -> {
+        ChannelName cn = new ChannelName(channelName);
+        AsyncSemaphore semaphore = service.getSemaphore(cn);
+        semaphore.acquire().thenAccept(c -> {
             if (entry.release() == 0) {
-                // just an assertion
-                boolean removed = entries.remove(entryName) == entry;
-                if (!removed) {
-                    throw new IllegalStateException();
-                }
-                service.unsubscribe(PubSubType.UNSUBSCRIBE, new ChannelName(channelName))
-                        .onComplete((r, e) -> {
+                entries.remove(entryName);
+                service.unsubscribeLocked(cn)
+                        .whenComplete((r, e) -> {
                             semaphore.release();
                         });
             } else {
                 semaphore.release();
             }
         });
-
     }
 
-    public RFuture<E> subscribe(String entryName, String channelName) {
+    public void timeout(CompletableFuture<?> promise) {
+        service.timeout(promise);
+    }
+
+    public void timeout(CompletableFuture<?> promise, long timeout) {
+        service.timeout(promise, timeout);
+    }
+    public CompletableFuture<E> subscribe(String entryName, String channelName) {
+        return subscribe(entryName, channelName, 1);
+    }
+    public CompletableFuture<E> subscribe(String entryName, String channelName, int permits) {
         AsyncSemaphore semaphore = service.getSemaphore(new ChannelName(channelName));
-        RPromise<E> newPromise = new RedissonPromise<>();
-        semaphore.acquire(() -> {
-            if (!newPromise.setUncancellable()) {
+        CompletableFuture<E> newPromise = new CompletableFuture<>();
+
+        semaphore.acquire().thenAccept(c -> {
+            if (newPromise.isDone()) {
                 semaphore.release();
                 return;
             }
 
             E entry = entries.get(entryName);
             if (entry != null) {
-                entry.acquire();
+                entry.acquire(permits);
                 semaphore.release();
-                entry.getPromise().onComplete(new TransferListener<E>(newPromise));
+                entry.getPromise().whenComplete((r, e) -> {
+                    if (e != null) {
+                        newPromise.completeExceptionally(e);
+                        return;
+                    }
+                    newPromise.complete(r);
+                });
                 return;
             }
 
             E value = createEntry(newPromise);
-            value.acquire();
+            value.acquire(permits);
 
             E oldValue = entries.putIfAbsent(entryName, value);
             if (oldValue != null) {
-                oldValue.acquire();
+                oldValue.acquire(permits);
                 semaphore.release();
-                oldValue.getPromise().onComplete(new TransferListener<E>(newPromise));
+                oldValue.getPromise().whenComplete((r, e) -> {
+                    if (e != null) {
+                        newPromise.completeExceptionally(e);
+                        return;
+                    }
+                    newPromise.complete(r);
+                });
                 return;
             }
 
             RedisPubSubListener<Object> listener = createListener(channelName, value);
-            service.subscribe(LongCodec.INSTANCE, channelName, semaphore, listener);
+            CompletableFuture<PubSubConnectionEntry> s = service.subscribeNoTimeout(LongCodec.INSTANCE, channelName, semaphore, listener);
+            newPromise.whenComplete((r, e) -> {
+                if (e != null) {
+                    s.completeExceptionally(e);
+                }
+            });
+            s.whenComplete((r, e) -> {
+                if (e != null) {
+                    entries.remove(entryName);
+                    value.getPromise().completeExceptionally(e);
+                    return;
+                }
+                if (!value.getPromise().complete(value)) {
+                    if (value.getPromise().isCompletedExceptionally()) {
+                        entries.remove(entryName);
+                    }
+                }
+            });
+
         });
 
         return newPromise;
     }
 
-    protected abstract E createEntry(RPromise<E> newPromise);
+    protected abstract E createEntry(CompletableFuture<E> newPromise);
 
     protected abstract void onMessage(E value, Long message);
 
@@ -114,20 +148,6 @@ abstract class PublishSubscribe<E extends PubSubEntry<E>> {
 
                 PublishSubscribe.this.onMessage(value, (Long) message);
             }
-
-            @Override
-            public boolean onStatus(PubSubType type, CharSequence channel) {
-                if (!channelName.equals(channel.toString())) {
-                    return false;
-                }
-
-                if (type == PubSubType.SUBSCRIBE) {
-                    value.getPromise().trySuccess(value);
-                    return true;
-                }
-                return false;
-            }
-
         };
         return listener;
     }

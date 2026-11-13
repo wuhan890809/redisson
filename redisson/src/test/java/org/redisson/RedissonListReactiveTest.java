@@ -3,26 +3,48 @@ package org.redisson;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RListReactive;
+import org.redisson.api.RedissonReactiveClient;
 import org.redisson.client.RedisException;
+import org.redisson.client.codec.StringCodec;
 import reactor.core.publisher.BaseSubscriber;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.function.Predicate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class RedissonListReactiveTest extends BaseReactiveTest {
 
     @Test
-    public void testHashCode() throws InterruptedException {
-        RListReactive<String> list = redisson.getList("list");
-        sync(list.add("a"));
-        sync(list.add("b"));
-        sync(list.add("c"));
+    public void test1() throws InterruptedException {
+        RListReactive<String> testQueue = redisson.getList("list");
+        Mono<Boolean> s = testQueue.addAll(Flux.just("a", "b", "c"));
+        Thread.sleep(400);
+        assertThat(testQueue.iterator().collectList().block()).isEmpty();
+        assertThat(s.block()).isTrue();
+        assertThat(testQueue.iterator().collectList().block()).containsExactly("a", "b", "c");
+    }
 
-        Assertions.assertEquals(126145, list.hashCode());
+    @Test
+    public void testIteratorFilter() {
+        for (int i = 0; i < 10; i++) {
+            RListReactive<String> testList = redisson.getList("list");
+            testList.delete().block();
+            testList.add("1").block();
+            testList.add("2").block();
+            testList.add("1").block();
+            testList.add("2").block();
+            Predicate<String> lambdaPredicate = (String s) -> s.equals("2");
+            Flux<String> ret = testList.iterator().filter(lambdaPredicate);
+            List<String> s = ret.collectList().block();
+            assertThat(s).containsExactly("2", "2");
+        }
     }
 
     @Test

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@
  */
 package org.redisson.client.protocol.decoder;
 
-import org.redisson.api.FastAutoClaimResult;
-import org.redisson.api.StreamMessageId;
+import org.redisson.api.stream.FastAutoClaimResult;
+import org.redisson.api.stream.StreamMessageId;
 import org.redisson.client.codec.Codec;
 import org.redisson.client.handler.State;
 import org.redisson.client.protocol.Decoder;
@@ -31,7 +31,7 @@ import java.util.List;
 public class FastAutoClaimDecoder implements MultiDecoder<FastAutoClaimResult> {
 
     @Override
-    public Decoder<Object> getDecoder(Codec codec, int paramNum, State state) {
+    public Decoder<Object> getDecoder(Codec codec, int paramNum, State state, long size) {
         return new StreamIdDecoder();
     }
 

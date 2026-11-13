@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,23 +15,44 @@
  */
 package org.redisson.connection.balancer;
 
+import org.redisson.client.protocol.RedisCommand;
+import org.redisson.client.protocol.RedisCommands;
+import org.redisson.connection.ClientConnectionsEntry;
+
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
-
-import org.redisson.connection.ClientConnectionsEntry;
 
 /**
  * 
  * @author Nikita Koksharov
  *
  */
-public class RoundRobinLoadBalancer implements LoadBalancer {
+public class RoundRobinLoadBalancer extends BaseLoadBalancer {
 
     private final AtomicInteger index = new AtomicInteger(-1);
+    private final AtomicInteger pubSubIndex = new AtomicInteger(-1);
+
+    @Override
+    public ClientConnectionsEntry getEntry(List<ClientConnectionsEntry> clientsCopy, RedisCommand<?> redisCommand) {
+        if (redisCommand != null
+                && RedisCommands.PUBSUB_COMMANDS.contains(redisCommand.getName())) {
+            return getEntry(clientsCopy, pubSubIndex);
+        }
+        return getEntry(clientsCopy, index);
+    }
 
     @Override
     public ClientConnectionsEntry getEntry(List<ClientConnectionsEntry> clientsCopy) {
-        int ind = Math.abs(index.incrementAndGet() % clientsCopy.size());
+        return getEntry(clientsCopy, index);
+    }
+
+    private ClientConnectionsEntry getEntry(List<ClientConnectionsEntry> clientsCopy, AtomicInteger counter) {
+        clientsCopy = filter(clientsCopy);
+        if (clientsCopy.isEmpty()) {
+            return null;
+        }
+
+        int ind = Math.floorMod(counter.incrementAndGet(), clientsCopy.size());
         return clientsCopy.get(ind);
     }
 

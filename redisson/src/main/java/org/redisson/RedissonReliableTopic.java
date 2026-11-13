@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,35 +15,38 @@
  */
 package org.redisson;
 
-import io.netty.buffer.ByteBufUtil;
 import io.netty.util.Timeout;
 import org.redisson.api.RFuture;
 import org.redisson.api.RReliableTopic;
-import org.redisson.api.StreamMessageId;
+import org.redisson.api.RStream;
+import org.redisson.api.stream.StreamMessageId;
 import org.redisson.api.listener.MessageListener;
+import org.redisson.api.stream.StreamReadGroupArgs;
 import org.redisson.client.codec.Codec;
 import org.redisson.client.codec.StringCodec;
 import org.redisson.client.protocol.RedisCommands;
 import org.redisson.codec.CompositeCodec;
 import org.redisson.command.CommandAsyncExecutor;
-import org.redisson.misc.RPromise;
-import org.redisson.misc.RedissonPromise;
+import org.redisson.misc.CompletableFutureWrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  *
  * @author Nikita Koksharov
  *
  */
-public class RedissonReliableTopic extends RedissonExpirable implements RReliableTopic {
+public final class RedissonReliableTopic extends RedissonExpirable implements RReliableTopic {
 
     private static final Logger log = LoggerFactory.getLogger(RedissonReliableTopic.class);
 
@@ -67,32 +70,26 @@ public class RedissonReliableTopic extends RedissonExpirable implements RReliabl
     }
 
     private final Map<String, Entry> listeners = new ConcurrentHashMap<>();
-    private final AtomicReference<String> subscriberId = new AtomicReference<>();
+    private final String subscriberId;
     private volatile RFuture<Map<StreamMessageId, Map<String, Object>>> readFuture;
     private volatile Timeout timeoutTask;
+    private final RStream<String, Object> stream;
+    private final AtomicBoolean subscribed = new AtomicBoolean();
+    private final String timeoutName;
 
-    public RedissonReliableTopic(Codec codec, CommandAsyncExecutor commandExecutor, String name) {
+    RedissonReliableTopic(Codec codec, CommandAsyncExecutor commandExecutor, String name) {
         super(codec, commandExecutor, name);
+        stream = new RedissonStream<>(new CompositeCodec(StringCodec.INSTANCE, codec), commandExecutor, name);
+        this.subscriberId = getServiceManager().generateId();
+        this.timeoutName = getTimeout(getRawName());
     }
 
-    public RedissonReliableTopic(CommandAsyncExecutor commandExecutor, String name) {
-        super(commandExecutor, name);
+    RedissonReliableTopic(CommandAsyncExecutor commandExecutor, String name) {
+        this(commandExecutor.getServiceManager().getCfg().getCodec(), commandExecutor, name);
     }
 
-    private String getSubscribersName() {
-        return suffixName(getRawName(), "subscribers");
-    }
-
-    private String getMapName() {
-        return suffixName(getRawName(), "map");
-    }
-
-    private String getCounter() {
-        return suffixName(getRawName(), "counter");
-    }
-
-    private String getTimeout() {
-        return suffixName(getRawName(), "timeout");
+    private String getTimeout(String name) {
+        return suffixName(name, "timeout");
     }
 
     @Override
@@ -126,7 +123,7 @@ public class RedissonReliableTopic extends RedissonExpirable implements RReliabl
     }
 
     public RFuture<Long> sizeAsync() {
-        return commandExecutor.readAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.XLEN, getRawName());
+        return stream.sizeAsync();
     }
 
     @Override
@@ -138,129 +135,150 @@ public class RedissonReliableTopic extends RedissonExpirable implements RReliabl
     public RFuture<Long> publishAsync(Object message) {
         return commandExecutor.evalWriteAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_LONG,
                 "redis.call('xadd', KEYS[1], '*', 'm', ARGV[1]); "
-                        + "return redis.call('zcard', KEYS[2]); ",
-                Arrays.asList(getRawName(), getSubscribersName()), encode(message));
-    }
-
-    protected String generateId() {
-        byte[] id = new byte[16];
-        ThreadLocalRandom.current().nextBytes(id);
-        return ByteBufUtil.hexDump(id);
+                    + "local v = redis.call('xinfo', 'groups', KEYS[1]); "
+                    + "return #v;",
+                Arrays.asList(getRawName()),
+                encode(message));
     }
 
     @Override
     public <M> RFuture<String> addListenerAsync(Class<M> type, MessageListener<M> listener) {
-        String id = generateId();
+        String id = getServiceManager().generateId();
         listeners.put(id, new Entry(type, listener));
 
-        if (subscriberId.get() != null) {
-            return RedissonPromise.newSucceededFuture(id);
+        if (!subscribed.compareAndSet(false, true)) {
+            return new CompletableFutureWrapper<>(id);
         }
 
-        if (subscriberId.compareAndSet(null, id)) {
+        RFuture<Void> addFuture = commandExecutor.evalWriteNoRetryAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_VOID,
+                          "redis.call('zadd', KEYS[2], ARGV[3], ARGV[2]);" +
+                                "redis.call('xgroup', 'create', KEYS[1], ARGV[2], ARGV[1], 'MKSTREAM'); ",
+                Arrays.asList(getRawName(), timeoutName),
+        StreamMessageId.ALL, subscriberId, System.currentTimeMillis() + getServiceManager().getCfg().getReliableTopicWatchdogTimeout());
+
+        CompletionStage<String> f = addFuture.thenApply(r -> {
             renewExpiration();
 
-            StreamMessageId startId = new StreamMessageId(System.currentTimeMillis(), 0);
+            poll(subscriberId);
+            return id;
+        });
 
-            RPromise<String> promise = new RedissonPromise<>();
-            RFuture<Void> addFuture = commandExecutor.evalWriteAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_VOID,
-                    "local value = redis.call('incr', KEYS[3]); "
-                            + "redis.call('zadd', KEYS[4], ARGV[3], ARGV[2]); "
-                            + "redis.call('zadd', KEYS[1], value, ARGV[2]); "
-                            + "redis.call('hset', KEYS[2], ARGV[2], ARGV[1]); ",
-                    Arrays.asList(getSubscribersName(), getMapName(), getCounter(), getTimeout()),
-                    startId, id, System.currentTimeMillis() + commandExecutor.getConnectionManager().getCfg().getReliableTopicWatchdogTimeout());
-            addFuture.onComplete((r, e) -> {
-                if (e != null) {
-                    promise.tryFailure(e);
-                    return;
-                }
-
-                poll(id, startId);
-                promise.trySuccess(id);
-            });
-
-            return promise;
-        }
-
-        return RedissonPromise.newSucceededFuture(id);
+        return new CompletableFutureWrapper<>(f);
     }
 
-    private void poll(String id, StreamMessageId startId) {
-        readFuture = commandExecutor.readAsync(getRawName(), new CompositeCodec(StringCodec.INSTANCE, codec),
-                RedisCommands.XREAD_BLOCKING_SINGLE, "BLOCK", 0, "STREAMS", getRawName(), startId);
-        readFuture.onComplete((res, ex) -> {
-            if (readFuture.isCancelled()) {
-                return;
+    private void poll(String id) {
+        RFuture<Map<StreamMessageId, Map<String, Object>>> f = stream.pendingRangeAsync(id, StreamMessageId.MIN, StreamMessageId.MAX, 100);
+        CompletionStage<Map<StreamMessageId, Map<String, Object>>> ff = f.thenCompose(r -> {
+            if (!subscribed.get()) {
+                return CompletableFuture.completedFuture(r);
             }
+
+            if (r.isEmpty()) {
+                readFuture = stream.readGroupAsync(id, "consumer",
+                                        StreamReadGroupArgs.neverDelivered().timeout(Duration.ofSeconds(0)));
+                return readFuture;
+            }
+            return CompletableFuture.completedFuture(r);
+        });
+
+        ff.whenComplete((res, ex) -> {
             if (ex != null) {
-                if (ex instanceof RedissonShutdownException) {
+                if (getServiceManager().isShuttingDown(ex)) {
                     return;
                 }
 
-                poll(id, startId);
-                return;
-            }
+                if (ex.getCause() != null
+                        && ex.getCause().getMessage().contains("NOGROUP")) {
+                    return;
+                }
 
-            commandExecutor.getConnectionManager().getExecutor().execute(() -> {
-                res.values().forEach(entry -> {
-                    Object m = entry.get("m");
-                    listeners.values().forEach(e -> {
-                        if (e.getType().isInstance(m)) {
-                            ((MessageListener<Object>) e.getListener()).onMessage(getRawName(), m);
-                        }
-                    });
-                });
-            });
+                log.error("Unable to poll a new element. Subscriber id: {}", id, ex.getCause());
 
-            if (listeners.isEmpty()) {
-                return;
-            }
-
-            StreamMessageId lastId = res.keySet().stream().skip(res.size() - 1).findFirst().get();
-            long time = System.currentTimeMillis();
-            RFuture<Boolean> updateFuture = commandExecutor.evalWriteAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
-                        "local r = redis.call('zscore', KEYS[2], ARGV[2]); "
-                            + "if r ~= false then "
-                                + "local value = redis.call('incr', KEYS[4]); "
-                                + "redis.call('zadd', KEYS[2], value, ARGV[2]); "
-                                + "redis.call('hset', KEYS[3], ARGV[2], ARGV[1]); "
-                            + "end; "
-
-                            + "local t = redis.call('zrange', KEYS[5], 0, 0, 'WITHSCORES'); "
-                            + "if tonumber(t[2]) < tonumber(ARGV[3]) then "
-                                + "redis.call('hdel', KEYS[3], t[1]); "
-                                + "redis.call('zrem', KEYS[2], t[1]); "
-                                + "redis.call('zrem', KEYS[5], t[1]); "
-                            + "end; "
-
-                            + "local v = redis.call('zrange', KEYS[2], 0, 0); "
-                            + "local score = redis.call('hget', KEYS[3], v[1]); "
-                            + "local range = redis.call('xrange', KEYS[1], score, '+'); "
-                            + "if #range == 0 then "
-                                + "redis.call('del', KEYS[1]); "
-                            + "elseif #range == 1 and range[1][1] == score then "
-                                + "redis.call('del', KEYS[1]); "
-                            + "else "
-                                + "redis.call('xtrim', KEYS[1], 'maxlen', #range); "
-                            + "end;"
-                            + "return r ~= false; ",
-                    Arrays.asList(getRawName(), getSubscribersName(), getMapName(), getCounter(), getTimeout()),
-                    lastId, id, time);
-            updateFuture.onComplete((re, exc) -> {
-                if (exc != null) {
-                    if (exc instanceof RedissonShutdownException) {
+                getServiceManager().newTimeout(task -> {
+                    if (getServiceManager().isShuttingDown()) {
                         return;
                     }
-                    log.error("Unable to update subscriber status", exc);
+
+                    poll(id);
+                }, 1, TimeUnit.SECONDS);
+                return;
+            }
+
+            CompletableFuture<Void> done = CompletableFuture.completedFuture(null);
+            if (!listeners.isEmpty()) {
+                done = CompletableFuture.runAsync(() -> {
+                    for (Map.Entry<StreamMessageId, Map<String, Object>> entry : res.entrySet()) {
+                        Object m = entry.getValue().get("m");
+                        listeners.values().forEach(e -> {
+                            if (e.getType().isInstance(m)) {
+                                ((MessageListener<Object>) e.getListener()).onMessage(getRawName(), m);
+                                stream.ack(id, entry.getKey());
+                            }
+                        });
+                    }
+                }, getServiceManager().getExecutor());
+            }
+
+            done.whenComplete((r, listenerException) -> {
+                if (listenerException != null) {
+                    if (getServiceManager().isShuttingDown(listenerException)) {
+                        return;
+                    }
+
+                    log.error("Unable to process a message. Subscriber id: {}", id, listenerException);
+
+                    getServiceManager().newTimeout(task -> {
+                        if (getServiceManager().isShuttingDown()) {
+                            return;
+                        }
+
+                        poll(id);
+                    }, 1, TimeUnit.SECONDS);
                     return;
                 }
 
-                if (!re || listeners.isEmpty()) {
-                    return;
-                }
+                long time = System.currentTimeMillis();
+                RFuture<Boolean> updateFuture = commandExecutor.evalWriteAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+                                "local expired = redis.call('zrangebyscore', KEYS[2], 0, tonumber(ARGV[2]) - 1); "
+                                + "for i, v in ipairs(expired) do "
+                                    + "redis.call('xgroup', 'destroy', KEYS[1], v); "
+                                    + "redis.call('zrem', KEYS[2], v); "
+                                + "end; "
+                                + "local r = redis.call('zscore', KEYS[2], ARGV[1]); "
 
-                poll(id, lastId);
+                                + "local score = 92233720368547758;"
+                                + "local groups = redis.call('xinfo', 'groups', KEYS[1]); " +
+                                  "for i, v in ipairs(groups) do "
+                                     + "local id1, id2 = string.match(v[8], '(.*)%-(.*)'); "
+                                     + "score = math.min(tonumber(id1), score); "
+                                + "end; " +
+
+                                  "score = tostring(score) .. '-0';"
+                                + "local range = redis.call('xrange', KEYS[1], score, '+'); "
+                                + "if #range == 0 or (#range == 1 and range[1][1] == score) then "
+                                    + "redis.call('xtrim', KEYS[1], 'maxlen', 0); "
+                                + "else "
+                                    + "redis.call('xtrim', KEYS[1], 'maxlen', #range); "
+                                + "end;"
+                                + "return r ~= false; ",
+                        Arrays.asList(getRawName(), timeoutName),
+                        id, time);
+
+                updateFuture.whenComplete((re, exc) -> {
+                    if (exc != null) {
+                        if (getServiceManager().isShuttingDown(exc)) {
+                            return;
+                        }
+                        log.error("Unable to update subscriber status", exc);
+                        return;
+                    }
+
+                    if (!re || !subscribed.get()) {
+                        return;
+                    }
+
+                    poll(id);
+                });
             });
 
         });
@@ -268,27 +286,40 @@ public class RedissonReliableTopic extends RedissonExpirable implements RReliabl
 
     @Override
     public RFuture<Boolean> deleteAsync() {
-        return deleteAsync(getRawName(), getSubscribersName(), getMapName(), getCounter(), getTimeout());
+        return deleteAsync(getRawName(), timeoutName);
     }
 
     @Override
     public RFuture<Long> sizeInMemoryAsync() {
-        return super.sizeInMemoryAsync(Arrays.asList(getRawName(), getSubscribersName(), getMapName(), getCounter(), getTimeout()));
+        return super.sizeInMemoryAsync(Arrays.asList(getRawName(), timeoutName));
     }
 
     @Override
-    public RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit) {
-        return expireAsync(timeToLive, timeUnit, getRawName(), getSubscribersName(), getMapName(), getCounter(), getTimeout());
+    public RFuture<Boolean> copyAsync(List<Object> keys, int database, boolean replace) {
+        String newName = (String) keys.get(1);
+        List<Object> kks = Arrays.asList(getRawName(), timeoutName,
+                newName, getTimeout(newName));
+        return super.copyAsync(kks, database, replace);
     }
 
     @Override
-    public RFuture<Boolean> expireAtAsync(long timestamp) {
-        return expireAtAsync(timestamp, getRawName(), getSubscribersName(), getMapName(), getCounter(), getTimeout());
+    public RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit, String param, String... keys) {
+        return super.expireAsync(timeToLive, timeUnit, param, getRawName(), timeoutName);
+    }
+
+    @Override
+    protected RFuture<Boolean> blessKeysAsync(String subcommand, String... keys) {
+        return super.blessKeysAsync(subcommand, getRawName(), timeoutName);
+    }
+
+    @Override
+    protected RFuture<Boolean> expireAtAsync(long timestamp, String param, String... keys) {
+        return super.expireAtAsync(timestamp, param, getRawName(), timeoutName);
     }
 
     @Override
     public RFuture<Boolean> clearExpireAsync() {
-        return clearExpireAsync(getRawName(), getSubscribersName(), getMapName(), getCounter(), getTimeout());
+        return clearExpireAsync(getRawName(), timeoutName);
     }
 
     @Override
@@ -298,20 +329,28 @@ public class RedissonReliableTopic extends RedissonExpirable implements RReliabl
         if (listeners.isEmpty()) {
             return removeSubscriber();
         }
-        return RedissonPromise.newSucceededFuture(null);
+        return CompletableFutureWrapper.completedNull();
     }
 
     private RFuture<Void> removeSubscriber() {
-        readFuture.cancel(false);
-        timeoutTask.cancel();
+        if (!subscribed.compareAndSet(true, false)) {
+            return CompletableFutureWrapper.completedNull();
+        }
 
-        String id = subscriberId.getAndSet(null);
+        RFuture<Map<StreamMessageId, Map<String, Object>>> rf = readFuture;
+        if (rf != null) {
+            rf.cancel(false);
+        }
+        Timeout tt = timeoutTask;
+        if (tt != null) {
+            tt.cancel();
+        }
+
         return commandExecutor.evalWriteAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_VOID,
-                "redis.call('zrem', KEYS[3], ARGV[1]); "
-                      + "redis.call('zrem', KEYS[1], ARGV[1]); "
-                      + "redis.call('hdel', KEYS[2], ARGV[1]); ",
-                Arrays.asList(getSubscribersName(), getMapName(), getTimeout()),
-                id);
+                "redis.call('xgroup', 'destroy', KEYS[1], ARGV[1]); "
+                      + "redis.call('zrem', KEYS[2], ARGV[1]); ",
+                Arrays.asList(getRawName(), timeoutName),
+                subscriberId);
     }
 
     @Override
@@ -321,22 +360,29 @@ public class RedissonReliableTopic extends RedissonExpirable implements RReliabl
 
     @Override
     public RFuture<Integer> countSubscribersAsync() {
-        return commandExecutor.readAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.ZCARD_INT, getSubscribersName());
+        return commandExecutor.evalReadAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_INTEGER,
+                        "local v = redis.call('xinfo', 'groups', KEYS[1]); " +
+                              "return #v;",
+                Arrays.asList(getRawName()));
     }
 
     private void renewExpiration() {
-        timeoutTask = commandExecutor.getConnectionManager().newTimeout(t -> {
+        timeoutTask = getServiceManager().newTimeout(t -> {
+            if (!subscribed.get() || getServiceManager().isShuttingDown()) {
+                return;
+            }
+
             RFuture<Boolean> future = commandExecutor.evalWriteAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
-                   "if redis.call('zscore', KEYS[1], ARGV[2]) == false then "
+                  "if redis.call('zscore', KEYS[1], ARGV[2]) == false then "
                          + "return 0; "
                       + "end; "
                       + "redis.call('zadd', KEYS[1], ARGV[1], ARGV[2]); "
                       + "return 1; ",
-                Arrays.asList(getTimeout()),
-                System.currentTimeMillis() + commandExecutor.getConnectionManager().getCfg().getReliableTopicWatchdogTimeout(), subscriberId.get());
-            future.onComplete((res, e) -> {
+                Arrays.asList(timeoutName),
+                System.currentTimeMillis() + getServiceManager().getCfg().getReliableTopicWatchdogTimeout(), subscriberId);
+            future.whenComplete((res, e) -> {
                 if (e != null) {
-                    log.error("Can't update reliable topic " + getRawName() + " expiration time", e);
+                    log.error("Can't update reliable topic {} expiration time", getRawName(), e);
                     return;
                 }
 
@@ -345,7 +391,7 @@ public class RedissonReliableTopic extends RedissonExpirable implements RReliabl
                     renewExpiration();
                 }
             });
-        }, commandExecutor.getConnectionManager().getCfg().getReliableTopicWatchdogTimeout() / 3, TimeUnit.MILLISECONDS);
+        }, getServiceManager().getCfg().getReliableTopicWatchdogTimeout() / 3, TimeUnit.MILLISECONDS);
     }
 
 

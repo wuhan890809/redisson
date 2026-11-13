@@ -1,32 +1,26 @@
 package org.redisson;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
-import java.io.IOException;
-import java.io.Serializable;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Set;
-import java.util.concurrent.ExecutionException;
-
+import io.netty.util.ResourceLeakDetector;
+import mockit.Invocation;
+import mockit.Mock;
+import mockit.MockUp;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.redisson.ClusterRunner.ClusterProcesses;
-import org.redisson.RedisRunner.FailedToStartRedisException;
-import org.redisson.api.RFuture;
-import org.redisson.api.RList;
-import org.redisson.api.RSet;
-import org.redisson.api.RedissonClient;
-import org.redisson.api.SortOrder;
+import org.redisson.api.*;
 import org.redisson.client.codec.IntegerCodec;
 import org.redisson.client.codec.StringCodec;
-import org.redisson.config.Config;
-import org.redisson.connection.balancer.RandomLoadBalancer;
 
-public class RedissonSetTest extends BaseTest {
+import java.io.Serializable;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class RedissonSetTest extends RedisDockerTest {
 
     public static class SimpleBean implements Serializable {
 
@@ -40,6 +34,40 @@ public class RedissonSetTest extends BaseTest {
             this.lng = lng;
         }
 
+    }
+
+    @Test
+    public void testContainsEach() {
+        RSet<Integer> set = redisson.getSet("list", IntegerCodec.INSTANCE);
+        set.add(0);
+        set.add(1);
+
+        assertThat(set.containsEach(Collections.emptySet())).isEmpty();
+        assertThat(set.containsEach(Arrays.asList(0, 1)))
+                .hasSize(2)
+                .containsOnly(0, 1);
+
+        assertThat(set.containsEach(Arrays.asList(0, 1, 2)))
+                .hasSize(2)
+                .containsOnly(0, 1);
+
+        assertThat(set.containsEach(Arrays.asList(0, 1, 0, 2)))
+                .hasSize(2)
+                .containsOnly(0, 1, 0);
+
+        assertThat(set.containsEach(Arrays.asList(2, 3, 4)))
+                .hasSize(0);
+    }
+
+    @Test
+    public void testRemoveAllCounted() {
+        RSet<Integer> set = redisson.getSet("list", IntegerCodec.INSTANCE);
+        set.add(0);
+        set.add(1);
+        set.add(2);
+        set.add(3);
+
+        assertThat(set.removeAllCounted(Arrays.asList(1, 2, 3, 4, 5))).isEqualTo(3);
     }
 
     @Test
@@ -485,12 +513,12 @@ public class RedissonSetTest extends BaseTest {
     public void testIteratorSequence() {
         Set<Long> set = redisson.getSet("set");
         for (int i = 0; i < 1000; i++) {
-            set.add(Long.valueOf(i));
+            set.add((long) i);
         }
 
         Set<Long> setCopy = new HashSet<Long>();
         for (int i = 0; i < 1000; i++) {
-            setCopy.add(Long.valueOf(i));
+            setCopy.add((long) i);
         }
 
         checkIterator(set, setCopy);
@@ -505,6 +533,34 @@ public class RedissonSetTest extends BaseTest {
         }
 
         Assertions.assertEquals(0, setCopy.size());
+    }
+
+    @Test
+    public void testIteratorAsync() {
+        RSet<Long> set = redisson.getSet("set");
+        for (int i = 0; i < 1000; i++) {
+            set.add((long) i);
+        }
+
+        AsyncIterator<Long> iterator = set.iteratorAsync(5);
+
+        Set<Long> set2 = new HashSet<>();
+        CompletionStage<Void> f = iterateAll(iterator, set2);
+        f.toCompletableFuture().join();
+        Assertions.assertEquals(1000, set2.size());
+    }
+
+    public CompletionStage<Void> iterateAll(AsyncIterator<Long> iterator, Set<Long> set) {
+        return iterator.hasNext().thenCompose(r -> {
+            if (r) {
+                return iterator.next().thenCompose(k -> {
+                    set.add(k);
+                    return iterateAll(iterator, set);
+                });
+            } else {
+                return CompletableFuture.completedFuture(null);
+            }
+        });
     }
 
     @Test
@@ -529,49 +585,25 @@ public class RedissonSetTest extends BaseTest {
     }
 
     @Test
-    public void testClusteredIterator() throws FailedToStartRedisException, IOException, InterruptedException {
-        RedisRunner master1 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner master2 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner master3 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave1 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave2 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave3 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave4 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave5 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave6 = new RedisRunner().randomPort().randomDir().nosave();
-        
-        ClusterRunner clusterRunner = new ClusterRunner()
-                .addNode(master1, slave1, slave4)
-                .addNode(master2, slave2, slave5)
-                .addNode(master3, slave3, slave6);
+    public void testClusteredIterator() {
+        testInCluster(redisson -> {
+            int size = 10000;
+            RSet<String> set = redisson.getSet("{test");
+            for (int i = 0; i < size; i++) {
+                set.add("" + i);
+            }
 
-        ClusterProcesses process = clusterRunner.run();
-        
-        Config config = new Config();
-        config.useClusterServers()
-        .setLoadBalancer(new RandomLoadBalancer())
-        .addNodeAddress(process.getNodes().stream().findAny().get().getRedisServerAddressAndPort());
-        RedissonClient redisson = Redisson.create(config);
+            Set<String> keys = new HashSet<>();
+            for (String key : set) {
+                keys.add(key);
+            }
 
-        int size = 10000;
-        RSet<String> set = redisson.getSet("{test");
-        for (int i = 0; i < size; i++) {
-            set.add("" + i);
-        }
-        
-        Set<String> keys = new HashSet<>();
-        for (String key : set) {
-            keys.add(key);
-        }
-        
-        assertThat(keys).hasSize(size);
-
-        redisson.shutdown();
-        process.shutdown();
+            assertThat(keys).hasSize(size);
+        });
     }
     
     @Test
-    public void testIteratorRemoveHighVolume() throws InterruptedException {
+    public void testIteratorRemoveHighVolume() {
         Set<Integer> set = redisson.getSet("set") /*new HashSet<Integer>()*/;
         for (int i = 0; i < 10000; i++) {
             set.add(i);
@@ -751,6 +783,69 @@ public class RedissonSetTest extends BaseTest {
     }
 
     @Test
+    public void testCountUnion() {
+        RSet<Integer> set = redisson.getSet("set");
+        set.add(5);
+        set.add(6);
+        RSet<Integer> set1 = redisson.getSet("set1");
+        set1.add(1);
+        set1.add(2);
+        RSet<Integer> set2 = redisson.getSet("set2");
+        set2.add(3);
+        set2.add(4);
+        set2.add(5);
+
+        assertThat(set.countUnion("set1", "set2")).isEqualTo(6);
+        assertThat(set.countUnion("set1")).isEqualTo(4);
+        // a missing key is treated as an empty set
+        assertThat(set.countUnion("set1", "unknownSet")).isEqualTo(4);
+        // counting stops as soon as the limit is reached
+        assertThat(set.countUnion(4, "set1", "set2")).isEqualTo(4);
+        assertThat(set.countUnion(0, "set1", "set2")).isEqualTo(6);
+        // current set is left untouched
+        assertThat(set).containsOnly(5, 6);
+    }
+
+    @Test
+    public void testCountUnionApprox() {
+        RSet<Integer> set = redisson.getSet("set");
+        set.add(5);
+        set.add(6);
+        RSet<Integer> set1 = redisson.getSet("set1");
+        set1.add(1);
+        set1.add(2);
+        RSet<Integer> set2 = redisson.getSet("set2");
+        set2.add(3);
+        set2.add(4);
+        set2.add(5);
+
+        // HyperLogLog based estimate, allow for the documented error margin
+        assertThat(set.countUnionApprox("set1", "set2")).isBetween(5, 7);
+        assertThat(set.countUnionApprox(4, "set1", "set2")).isEqualTo(4);
+        assertThat(set).containsOnly(5, 6);
+    }
+
+    @Test
+    public void testCountDiff() {
+        RSet<Integer> set = redisson.getSet("set");
+        set.addAll(Arrays.asList(1, 2, 3, 4, 5));
+        RSet<Integer> set1 = redisson.getSet("set1");
+        set1.add(4);
+        RSet<Integer> set2 = redisson.getSet("set2");
+        set2.add(5);
+
+        assertThat(set.countDiff("set1", "set2")).isEqualTo(3);
+        assertThat(set.countDiff("set1")).isEqualTo(4);
+        // a missing key is treated as an empty set
+        assertThat(set.countDiff("unknownSet")).isEqualTo(5);
+        // counting stops as soon as the limit is reached
+        assertThat(set.countDiff(2, "set1", "set2")).isEqualTo(2);
+        assertThat(set.countDiff(0, "set1", "set2")).isEqualTo(3);
+        // current set is left untouched
+        assertThat(set).containsOnly(1, 2, 3, 4, 5);
+    }
+
+    @Test
     public void testIntersection() {
         RSet<Integer> set = redisson.getSet("set");
         set.add(5);
@@ -789,7 +884,7 @@ public class RedissonSetTest extends BaseTest {
 
     
     @Test
-    public void testMove() throws Exception {
+    public void testMove() {
         RSet<Integer> set = redisson.getSet("set");
         RSet<Integer> otherSet = redisson.getSet("otherSet");
 
@@ -806,7 +901,7 @@ public class RedissonSetTest extends BaseTest {
     }
 
     @Test
-    public void testMoveNoMember() throws Exception {
+    public void testMoveNoMember() {
         RSet<Integer> set = redisson.getSet("set");
         RSet<Integer> otherSet = redisson.getSet("otherSet");
 
@@ -853,5 +948,68 @@ public class RedissonSetTest extends BaseTest {
         Assertions.assertTrue(list.removeAll(Arrays.asList(1, 5, 1, 5)));
 
         Assertions.assertTrue(list.isEmpty());
+    }
+
+    @Test
+    public void testDistributedIterator() {
+        RSet<String> set = redisson.getSet("set", StringCodec.INSTANCE);
+
+        // populate set with elements
+        List<String> stringsOne = IntStream.range(0, 128).mapToObj(i -> "one-" + i).collect(Collectors.toList());
+        List<String> stringsTwo = IntStream.range(0, 128).mapToObj(i -> "two-" + i).collect(Collectors.toList());
+        set.addAll(stringsOne);
+        set.addAll(stringsTwo);
+
+        Iterator<String> stringIterator = set.distributedIterator("iterator_{set}", "one*", 10);
+
+        // read some elements using iterator
+        List<String> strings = new ArrayList<>();
+        for (int i = 0; i < 64; i++) {
+            if (stringIterator.hasNext()) {
+                strings.add(stringIterator.next());
+            }
+        }
+
+        // create another iterator instance using the same name
+        RSet<String> set2 = redisson.getSet("set", StringCodec.INSTANCE);
+        Iterator<String> stringIterator2 = set2.distributedIterator("iterator_{set}", "one*", 10);
+
+        Assertions.assertTrue(stringIterator2.hasNext());
+
+        // read all remaining elements
+        stringIterator2.forEachRemaining(strings::add);
+        stringIterator.forEachRemaining(strings::add);
+
+        assertThat(strings).containsAll(stringsOne);
+        assertThat(strings).hasSize(stringsOne.size());
+    }
+
+    @Test
+    public void testAddAndContainsInTransactionShouldNotShowResourceLeak() {
+
+        new MockUp<ResourceLeakDetector<?>>() {
+            @Mock
+            void reportTracedLeak(Invocation invocation, String resourceType, String records) {
+                invocation.proceed();
+                Assertions.fail();
+            }
+
+            @Mock
+            void reportUntracedLeak(Invocation invocation, String resourceType) {
+                invocation.proceed();
+                Assertions.fail();
+            }
+        };
+
+        RTransaction tx = redisson.createTransaction(TransactionOptions.defaults());
+        RSet<Integer> testSet = tx.getSet("testSet");
+        for (int index = 0; index < 1000; index++) {
+            testSet.add(index);
+            if (testSet.contains(index)) {
+                // do nothing
+            }
+        }
+
+        tx.commit();
     }
 }

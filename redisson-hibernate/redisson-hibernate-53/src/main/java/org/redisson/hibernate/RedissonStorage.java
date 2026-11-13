@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import org.hibernate.engine.spi.SharedSessionContractImplementor;
 import org.redisson.api.RFuture;
 import org.redisson.api.RMapCache;
 import org.redisson.connection.ConnectionManager;
+import org.redisson.connection.ServiceManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,7 +39,7 @@ public class RedissonStorage implements DomainDataStorageAccess {
 
     private final RMapCache<Object, Object> mapCache;
 
-    private final ConnectionManager connectionManager;
+    private final ServiceManager serviceManager;
 
     int ttl;
     int maxIdle;
@@ -46,46 +47,46 @@ public class RedissonStorage implements DomainDataStorageAccess {
     boolean fallback;
     volatile boolean fallbackMode;
     
-    public RedissonStorage(RMapCache<Object, Object> mapCache, ConnectionManager connectionManager, Map<String, Object> properties, String defaultKey) {
+    public RedissonStorage(String regionName, RMapCache<Object, Object> mapCache, ServiceManager serviceManager, Map<String, Object> properties, String defaultKey) {
         super();
         this.mapCache = mapCache;
-        this.connectionManager = connectionManager;
+        this.serviceManager = serviceManager;
         
-        String maxEntries = getProperty(properties, mapCache.getName(), defaultKey, RedissonRegionFactory.MAX_ENTRIES_SUFFIX);
+        String maxEntries = getProperty(properties, mapCache.getName(), regionName, defaultKey, RedissonRegionFactory.MAX_ENTRIES_SUFFIX);
         if (maxEntries != null) {
-            size = Integer.valueOf(maxEntries);
+            size = Integer.parseInt(maxEntries);
             mapCache.setMaxSize(size);
         }
-        String timeToLive = getProperty(properties, mapCache.getName(), defaultKey, RedissonRegionFactory.TTL_SUFFIX);
+        String timeToLive = getProperty(properties, mapCache.getName(), regionName, defaultKey, RedissonRegionFactory.TTL_SUFFIX);
         if (timeToLive != null) {
-            ttl = Integer.valueOf(timeToLive);
+            ttl = Integer.parseInt(timeToLive);
         }
-        String maxIdleTime = getProperty(properties, mapCache.getName(), defaultKey, RedissonRegionFactory.MAX_IDLE_SUFFIX);
+        String maxIdleTime = getProperty(properties, mapCache.getName(), regionName, defaultKey, RedissonRegionFactory.MAX_IDLE_SUFFIX);
         if (maxIdleTime != null) {
-            maxIdle = Integer.valueOf(maxIdleTime);
+            maxIdle = Integer.parseInt(maxIdleTime);
         }
 
         String fallbackValue = (String) properties.getOrDefault(RedissonRegionFactory.FALLBACK, "false");
-        fallback = Boolean.valueOf(fallbackValue);
+        fallback = Boolean.parseBoolean(fallbackValue);
     }
 
-    private String getProperty(Map<String, Object> properties, String name, String defaultKey, String suffix) {
+    private String getProperty(Map<String, Object> properties, String name, String regionName, String defaultKey, String suffix) {
         String maxEntries = (String) properties.get(RedissonRegionFactory.CONFIG_PREFIX + name + suffix);
         if (maxEntries != null) {
             return maxEntries;
         }
-        String defValue = (String) properties.get(RedissonRegionFactory.CONFIG_PREFIX + defaultKey + suffix);
-        if (defValue != null) {
-            return defValue;
+        maxEntries = (String) properties.get(RedissonRegionFactory.CONFIG_PREFIX + regionName + suffix);
+        if (maxEntries != null) {
+            return maxEntries;
         }
-        return null;
+        return (String) properties.get(RedissonRegionFactory.CONFIG_PREFIX + defaultKey + suffix);
     }
 
     private void ping() {
         fallbackMode = true;
-        connectionManager.newTimeout(t -> {
+        serviceManager.newTimeout(t -> {
             RFuture<Boolean> future = mapCache.isExistsAsync();
-            future.onComplete((r, ex) -> {
+            future.whenComplete((r, ex) -> {
                 if (ex == null) {
                     fallbackMode = false;
                 } else {

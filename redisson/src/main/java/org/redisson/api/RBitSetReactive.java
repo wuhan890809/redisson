@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,12 @@
  */
 package org.redisson.api;
 
+import org.redisson.api.bitset.BitFieldArgs;
+import org.redisson.api.bitset.BitRangeArgs;
 import reactor.core.publisher.Mono;
 
 import java.util.BitSet;
+import java.util.List;
 
 /**
  * Reactive interface for BitSet object
@@ -94,6 +97,25 @@ public interface RBitSetReactive extends RExpirableReactive {
      * @return result value
      */
     Mono<Long> incrementAndGetUnsigned(int size, long offset, long increment);
+
+    /**
+     * Executes BITFIELD command with multiple subcommands
+     * and returns result list in the same order.
+     * <p>
+     * If {@code args} only reads (no SET or INCRBY) and ReadMode
+     * is anything but MASTER, {@code BITFIELD_RO} is executed instead,
+     * so a replica can serve the call. If the server lacks
+     * {@code BITFIELD_RO} (Redis before 6.0) or ACL rules deny it,
+     * the call is retried as {@code BITFIELD} on the master, and
+     * this Redisson instance uses {@code BITFIELD} for such reads
+     * from then on.
+     * <p>
+     * In a batch, {@code BITFIELD_RO} is executed without this fallback.
+     *
+     * @param args - bitfield arguments
+     * @return result values
+     */
+    Mono<List<Long>> bitField(BitFieldArgs args);
 
     /**
      * Returns byte number at specified <code>offset</code>
@@ -249,9 +271,9 @@ public interface RBitSetReactive extends RExpirableReactive {
     /**
      * Executes NOT operation over all bits
      * 
-     * @return void
+     * @return length in bytes of the destination key
      */
-    Mono<Void> not();
+    Mono<Long> not();
 
     /**
      * Set all bits to one from <code>fromIndex</code> (inclusive) to <code>toIndex</code> (exclusive)
@@ -276,6 +298,14 @@ public interface RBitSetReactive extends RExpirableReactive {
      * @return <code>true</code> if bit set to one and <code>false</code> overwise.
      */
     Mono<Boolean> get(long bitIndex);
+    
+    /**
+     * Returns a boolean array where each element of the array corresponds to the query result of the input parameters.
+     *
+     * @param bitIndexes indexes of bit
+     * @return Returns a boolean array where each element of the array corresponds to the query result of the input parameters.
+     */
+    Mono<boolean[]> get(long... bitIndexes);
 
     /**
      * Set bit to one at specified bitIndex
@@ -304,6 +334,24 @@ public interface RBitSetReactive extends RExpirableReactive {
     Mono<Long> cardinality();
 
     /**
+     * Returns the indexes of the bits set to one in a range, in ascending order,
+     * or of the bits set to zero with {@link BitRangeArgs#zeros()}.
+     * The range covers the same bits as {@code BITCOUNT} would.
+     * <p>
+     * Indexes are numbered as in {@link #get(long)}.
+     * <p>
+     * Returns an empty array if the object doesn't exist or the range is empty.
+     * <p>
+     * Uses {@code BITRANGEINTARRAY} command.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param args range, limit and the value of the bits to return
+     * @return indexes of the matching bits
+     */
+    Mono<long[]> getIndexes(BitRangeArgs args);
+
+    /**
      * Set bit to zero at specified <code>bitIndex</code>
      *
      * @param bitIndex - index of bit
@@ -324,26 +372,66 @@ public interface RBitSetReactive extends RExpirableReactive {
      * Stores result into this object.
      * 
      * @param bitSetNames - name of stored bitsets
-     * @return void
+     * @return length in bytes of the destination key
      */
-    Mono<Void> or(String... bitSetNames);
+    Mono<Long> or(String... bitSetNames);
 
     /**
      * Executes AND operation over this object and specified bitsets.
      * Stores result into this object.
      * 
      * @param bitSetNames - name of stored bitsets
-     * @return void
+     * @return length in bytes of the destination key
      */
-    Mono<Void> and(String... bitSetNames);
+    Mono<Long> and(String... bitSetNames);
 
     /**
      * Executes XOR operation over this object and specified bitsets.
      * Stores result into this object.
      * 
      * @param bitSetNames - name of stored bitsets
-     * @return void
+     * @return length in bytes of the destination key
      */
-    Mono<Void> xor(String... bitSetNames);
+    Mono<Long> xor(String... bitSetNames);
+
+    /**
+     * Executes bitwise DIFF operation over this object and specified bitsets.
+     * Sets bits that are set in this object but not in any of the other bitsets.
+     * Stores result into this object.
+     *
+     * @param bitSetNames name of stored bitsets
+     * @return length in bytes of the destination key
+     */
+    Mono<Long> diff(String... bitSetNames);
+
+    /**
+     * Executes bitwise DIFF1 operation over this object and specified bitsets.
+     * Sets bits that are set in one or more of the other bitsets but not in this object.
+     * Stores result into this object.
+     *
+     * @param bitSetNames name of stored bitsets
+     * @return length in bytes of the destination key
+     */
+    Mono<Long> diffInverse(String... bitSetNames);
+
+    /**
+     * Executes bitwise ANDOR operation over this object and specified bitsets.
+     * Sets bits that are set in this object AND also in one or more of the other bitsets.
+     * Stores result into this object.
+     *
+     * @param bitSetNames name of stored bitsets
+     * @return length in bytes of the destination key
+     */
+    Mono<Long> andOr(String... bitSetNames);
+
+    /**
+     * Executes bitwise ONE operation over this object and specified bitsets.
+     * Sets bits that are set in exactly one of the provided bitsets.
+     * Stores result into this object.
+     *
+     * @param bitSetNames name of stored bitsets
+     * @return length in bytes of the destination key
+     */
+    Mono<Long> setExclusive(String... bitSetNames);
 
 }

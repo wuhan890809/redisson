@@ -1,27 +1,21 @@
 package org.redisson.codec;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.util.CharsetUtil;
 import org.junit.jupiter.api.Test;
-import org.redisson.BaseTest;
+import org.redisson.RedisDockerTest;
 import org.redisson.api.RBucket;
 import org.redisson.api.RMap;
 import org.redisson.client.handler.State;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.*;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
-import io.netty.util.CharsetUtil;
+import static org.assertj.core.api.Assertions.assertThat;
 
-public class TypedJsonJacksonCodecTest extends BaseTest {
+public class TypedJsonJacksonCodecTest extends RedisDockerTest {
 
     public static class Simple {
         
@@ -107,5 +101,33 @@ public class TypedJsonJacksonCodecTest extends BaseTest {
     public void shouldSerializeTheStringCorrectly() throws Exception {
         assertThat(mapCodec.getMapValueEncoder().encode("foo").toString(CharsetUtil.UTF_8))
                 .isEqualTo("\"foo\"");
+    }
+
+    @Test
+    public void shouldSerializeUuidWithoutClassMetadata() throws Exception {
+        UUID uuid = UUID.fromString("00000000-0000-0000-0000-000000000001");
+        TypedJsonJacksonCodec uuidCodec = new TypedJsonJacksonCodec(UUID.class);
+
+        ByteBuf encoded = uuidCodec.getValueEncoder().encode(uuid);
+        try {
+            assertThat(encoded.toString(CharsetUtil.UTF_8))
+                    .isEqualTo("\"" + uuid.toString() + "\"");
+        } finally {
+            encoded.release();
+        }
+    }
+
+    @Test
+    public void shouldRoundTripUuidValue() throws Exception {
+        UUID uuid = UUID.randomUUID();
+        TypedJsonJacksonCodec uuidCodec = new TypedJsonJacksonCodec(UUID.class);
+
+        ByteBuf encoded = uuidCodec.getValueEncoder().encode(uuid);
+        try {
+            assertThat(uuidCodec.getValueDecoder().decode(encoded, new State()))
+                    .isEqualTo(uuid);
+        } finally {
+            encoded.release();
+        }
     }
 }

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
  */
 package org.redisson.client.protocol.decoder;
 
-import org.redisson.api.PendingEntry;
+import org.redisson.api.stream.PendingEntry;
 import org.redisson.client.handler.State;
 import org.redisson.client.protocol.convertor.StreamIdConvertor;
 
@@ -36,7 +36,7 @@ public class PendingEntryDecoder implements MultiDecoder<Object> {
             return parts;
         }
         return new PendingEntry(convertor.convert(parts.get(0)), parts.get(1).toString(), 
-                Long.valueOf(parts.get(2).toString()), Long.valueOf(parts.get(3).toString()));
+                Long.parseLong(parts.get(2).toString()), Long.parseLong(parts.get(3).toString()));
     }
 
 }

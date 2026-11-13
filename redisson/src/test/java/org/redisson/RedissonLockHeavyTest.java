@@ -14,7 +14,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
-public class RedissonLockHeavyTest extends BaseTest {
+public class RedissonLockHeavyTest extends RedisDockerTest {
 
     public static Collection<Arguments> data() {
         return Arrays.asList(Arguments.of(2, 5000),
@@ -23,31 +23,27 @@ public class RedissonLockHeavyTest extends BaseTest {
     }
 
     @ParameterizedTest
-    @MethodSource("mapClasses")
+    @MethodSource("data")
     public void lockUnlockRLock(int threads, int loops) throws Exception {
         ExecutorService executor = Executors.newFixedThreadPool(threads);
         for (int i = 0; i < threads; i++) {
 
-            Runnable worker = new Runnable() {
-
-                @Override
-                public void run() {
-                    for (int j = 0; j < loops; j++) {
-                        RLock lock = redisson.getLock("RLOCK_" + j);
-                        lock.lock();
+            Runnable worker = () -> {
+                for (int j = 0; j < loops; j++) {
+                    RLock lock = redisson.getLock("RLOCK_" + j);
+                    lock.lock();
+                    try {
+                        RBucket<String> bucket = redisson.getBucket("RBUCKET_" + j);
+                        bucket.set("TEST", 30, TimeUnit.SECONDS);
+                        RSemaphore semaphore = redisson.getSemaphore("SEMAPHORE_" + j);
+                        semaphore.release();
                         try {
-                            RBucket<String> bucket = redisson.getBucket("RBUCKET_" + j);
-                            bucket.set("TEST", 30, TimeUnit.SECONDS);
-                            RSemaphore semaphore = redisson.getSemaphore("SEMAPHORE_" + j);
-                            semaphore.release();
-                            try {
-                                semaphore.acquire();
-                            } catch (InterruptedException e) {
-                                e.printStackTrace();
-                            }
-                        } finally {
-                            lock.unlock();
+                            semaphore.acquire();
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
                         }
+                    } finally {
+                        lock.unlock();
                     }
                 }
             };
@@ -57,40 +53,36 @@ public class RedissonLockHeavyTest extends BaseTest {
         executor.awaitTermination(threads * loops, TimeUnit.SECONDS);
 
     }
-    
+
     @ParameterizedTest
-    @MethodSource("mapClasses")
+    @MethodSource("data")
     public void tryLockUnlockRLock(int threads, int loops) throws Exception {
         ExecutorService executor = Executors.newFixedThreadPool(threads);
 
         for (int i = 0; i < threads; i++) {
 
-            Runnable worker = new Runnable() {
-
-                @Override
-                public void run() {
-                    for (int j = 0; j < loops; j++) {
-                        RLock lock = redisson.getLock("RLOCK_" + j);
-                        try {
-                            if (lock.tryLock(ThreadLocalRandom.current().nextInt(10), TimeUnit.MILLISECONDS)) {
+            Runnable worker = () -> {
+                for (int j = 0; j < loops; j++) {
+                    RLock lock = redisson.getLock("RLOCK_" + j);
+                    try {
+                        if (lock.tryLock(ThreadLocalRandom.current().nextInt(10), TimeUnit.MILLISECONDS)) {
+                            try {
+                                RBucket<String> bucket = redisson.getBucket("RBUCKET_" + j);
+                                bucket.set("TEST", 30, TimeUnit.SECONDS);
+                                RSemaphore semaphore = redisson.getSemaphore("SEMAPHORE_" + j);
+                                semaphore.release();
                                 try {
-                                    RBucket<String> bucket = redisson.getBucket("RBUCKET_" + j);
-                                    bucket.set("TEST", 30, TimeUnit.SECONDS);
-                                    RSemaphore semaphore = redisson.getSemaphore("SEMAPHORE_" + j);
-                                    semaphore.release();
-                                    try {
-                                        semaphore.acquire();
-                                    } catch (InterruptedException e) {
-                                        e.printStackTrace();
-                                    }
-                                } finally {
-                                    lock.unlock();
+                                    semaphore.acquire();
+                                } catch (InterruptedException e) {
+                                    e.printStackTrace();
                                 }
+                            } finally {
+                                lock.unlock();
                             }
-                        } catch (InterruptedException e) {
-                            // TODO Auto-generated catch block
-                            e.printStackTrace();
                         }
+                    } catch (InterruptedException e) {
+                        // TODO Auto-generated catch block
+                        e.printStackTrace();
                     }
                 }
             };

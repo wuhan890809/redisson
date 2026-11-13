@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import org.redisson.RedissonLock;
 import org.redisson.api.RKeys;
 import org.redisson.command.CommandAsyncExecutor;
 import org.redisson.transaction.RedissonTransactionalLock;
+import org.redisson.transaction.RedissonTransactionalWriteLock;
 
 /**
  * 
@@ -28,19 +29,23 @@ import org.redisson.transaction.RedissonTransactionalLock;
  */
 public class DeleteOperation extends TransactionalOperation {
 
+    private String writeLockName;
     private String lockName;
     private String transactionId;
-    private long threadId;
-    
+
     public DeleteOperation(String name) {
         this(name, null, null, 0);
     }
     
     public DeleteOperation(String name, String lockName, String transactionId, long threadId) {
-        super(name, null);
+        super(name, null, threadId);
         this.lockName = lockName;
         this.transactionId = transactionId;
-        this.threadId = threadId;
+    }
+
+    public DeleteOperation(String name, String lockName, String writeLockName, String transactionId, long threadId) {
+        this(name, lockName, transactionId, threadId);
+        this.writeLockName = writeLockName;
     }
 
     @Override
@@ -51,6 +56,10 @@ public class DeleteOperation extends TransactionalOperation {
             RedissonLock lock = new RedissonTransactionalLock(commandExecutor, lockName, transactionId);
             lock.unlockAsync();
         }
+        if (writeLockName != null) {
+            RedissonLock lock = new RedissonTransactionalWriteLock(commandExecutor, writeLockName, transactionId);
+            lock.unlockAsync(getThreadId());
+        }
     }
 
     @Override
@@ -58,6 +67,10 @@ public class DeleteOperation extends TransactionalOperation {
         if (lockName != null) {
             RedissonLock lock = new RedissonTransactionalLock(commandExecutor, lockName, transactionId);
             lock.unlockAsync();
+        }
+        if (writeLockName != null) {
+            RedissonLock lock = new RedissonTransactionalWriteLock(commandExecutor, writeLockName, transactionId);
+            lock.unlockAsync(getThreadId());
         }
     }
     

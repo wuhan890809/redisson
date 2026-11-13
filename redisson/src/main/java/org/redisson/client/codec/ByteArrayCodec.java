@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,13 +15,8 @@
  */
 package org.redisson.client.codec;
 
-import java.io.IOException;
-
-import org.redisson.client.handler.State;
 import org.redisson.client.protocol.Decoder;
 import org.redisson.client.protocol.Encoder;
-
-import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 
 /**
@@ -33,20 +28,12 @@ public class ByteArrayCodec extends BaseCodec {
 
     public static final ByteArrayCodec INSTANCE = new ByteArrayCodec();
 
-    private final Encoder encoder = new Encoder() {
-        @Override
-        public ByteBuf encode(Object in) throws IOException {
-            return Unpooled.wrappedBuffer((byte[]) in);
-        }
-    };
+    private final Encoder encoder = in -> Unpooled.wrappedBuffer((byte[]) in);
 
-    private final Decoder<Object> decoder = new Decoder<Object>() {
-        @Override
-        public Object decode(ByteBuf buf, State state) {
-            byte[] result = new byte[buf.readableBytes()];
-            buf.readBytes(result);
-            return result;
-        }
+    private final Decoder<Object> decoder = (buf, state) -> {
+        byte[] result = new byte[buf.readableBytes()];
+        buf.readBytes(result);
+        return result;
     };
 
     @Override

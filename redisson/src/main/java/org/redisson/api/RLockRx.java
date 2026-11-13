@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package org.redisson.api;
 
+import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
 import io.reactivex.rxjava3.core.Completable;
@@ -26,7 +27,7 @@ import io.reactivex.rxjava3.core.Single;
  * @author Nikita Koksharov
  *
  */
-public interface RLockRx {
+public interface RLockRx extends RObservableRx {
 
     /**
      * Returns name of object
@@ -174,6 +175,15 @@ public interface RLockRx {
     Single<Boolean> isLocked();
 
     /**
+     * Checks if the lock is held by thread with defined <code>threadId</code>
+     *
+     * @param threadId Thread ID of locking thread
+     * @return <code>true</code> if held by thread with given id
+     *          otherwise <code>false</code>
+     */
+    Single<Boolean> isHeldByThread(long threadId);
+
+    /**
      * Remaining time to live of the lock
      *
      * @return time in milliseconds
@@ -181,5 +191,30 @@ public interface RLockRx {
      *          -1 if the lock exists but has no associated expire.
      */
     Single<Long> remainTimeToLive();
+
+    /**
+     * Updates the lease time of this lock only if already specified
+     *
+     * Can be called only by the thread that holds this lock.
+     *
+     * @param leaseTime the new lease time
+     * @return <code>true</code> if the lease time was updated,
+     *          <code>false</code> if the lock is not held by the current thread
+     *          or has no explicit lease time
+     */
+    Single<Boolean> updateLeaseTime(Duration leaseTime);
+
+    /**
+     * Sets the lease time of this lock only if the lock is currently managed
+     * by the watchdog (no explicit lease time was specified).
+     *
+     * Can be called only by the thread that holds this lock.
+     *
+     * @param leaseTime the lease time to set
+     * @return <code>true</code> if the lease time was set,
+     *          <code>false</code> if the lock is not held by the current thread
+     *          or already has an explicit lease time
+     */
+    Single<Boolean> setLeaseTimeIfNotSet(Duration leaseTime);
     
 }

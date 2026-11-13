@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,9 @@
  */
 package org.redisson.api;
 
+import org.redisson.api.atomic.CompareAndDeleteArgs;
+import org.redisson.api.atomic.DoubleIncrementArgs;
+
 /**
  * Distributed implementation to the AtomicDouble
  *
@@ -22,6 +25,15 @@ package org.redisson.api;
  *
  */
 public interface RAtomicDouble extends RExpirable, RAtomicDoubleAsync {
+
+    /**
+     * Atomically deletes the value if it satisfies the condition
+     * defined by the specified arguments.
+     *
+     * @param args compare and delete arguments
+     * @return {@code true} if deleted, {@code false} otherwise
+     */
+    boolean compareAndDelete(CompareAndDeleteArgs args);
 
     /**
      * Atomically decrements by one the current value.
@@ -94,6 +106,14 @@ public interface RAtomicDouble extends RExpirable, RAtomicDoubleAsync {
     double incrementAndGet();
 
     /**
+     * Atomically increments the current value according to the specified arguments.
+     *
+     * @param args increment arguments
+     * @return the updated value
+     */
+    double incrementAndGet(DoubleIncrementArgs args);
+
+    /**
      * Atomically increments the current value by one.
      *
      * @return the old value
@@ -106,5 +126,37 @@ public interface RAtomicDouble extends RExpirable, RAtomicDoubleAsync {
      * @param newValue the new value
      */
     void set(double newValue);
+    
+    /**
+     * Atomically sets the given value if current value is less than
+     * the special value
+     *
+     * @param less  compare value
+     * @param value newValue
+     * @return true when the value update is successful
+     */
+    boolean setIfLess(double less, double value);
+    
+    /**
+     * Atomically sets the given value if current value is greater than
+     * the special value
+     *
+     * @param greater  compare value
+     * @param value newValue
+     * @return true when the value update is successful
+     */
+    boolean setIfGreater(double greater, double value);
+
+    /**
+     * Adds object event listener
+     *
+     * @see org.redisson.api.listener.IncrByListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
+     *
+     * @param listener object event listener
+     * @return listener id
+     */
+    int addListener(ObjectListener listener);
 
 }

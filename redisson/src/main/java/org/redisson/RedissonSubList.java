@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,21 +15,6 @@
  */
 package org.redisson;
 
-import static org.redisson.client.protocol.RedisCommands.EVAL_OBJECT;
-import static org.redisson.client.protocol.RedisCommands.LINDEX;
-import static org.redisson.client.protocol.RedisCommands.LPOP;
-import static org.redisson.client.protocol.RedisCommands.LPUSH_BOOLEAN;
-import static org.redisson.client.protocol.RedisCommands.LRANGE;
-
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-import java.util.ListIterator;
-import java.util.NoSuchElementException;
-import java.util.concurrent.atomic.AtomicInteger;
-
 import org.redisson.api.RFuture;
 import org.redisson.api.RList;
 import org.redisson.client.codec.Codec;
@@ -39,7 +24,12 @@ import org.redisson.client.protocol.RedisStrictCommand;
 import org.redisson.client.protocol.convertor.Convertor;
 import org.redisson.client.protocol.convertor.IntegerReplayConvertor;
 import org.redisson.command.CommandAsyncExecutor;
-import org.redisson.misc.RedissonPromise;
+import org.redisson.misc.CompletableFutureWrapper;
+
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.redisson.client.protocol.RedisCommands.*;
 
 /**
  * Distributed and concurrent implementation of {@link java.util.List}
@@ -62,7 +52,7 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
 
     public RFuture<Integer> sizeAsync() {
         if (size != -1) {
-            return RedissonPromise.newSucceededFuture(size);
+            return new CompletableFutureWrapper<>(size);
         }
         return commandExecutor.readAsync(getRawName(), codec, new RedisStrictCommand<Integer>("LLEN", new IntegerReplayConvertor() {
             @Override
@@ -76,7 +66,14 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
 
     @Override
     public RFuture<List<V>> readAllAsync() {
+        if (isEmptyRange()) {
+            return new CompletableFutureWrapper<>(Collections.<V>emptyList());
+        }
         return commandExecutor.readAsync(getRawName(), codec, LRANGE, getRawName(), fromIndex, toIndex.get()-1);
+    }
+
+    private boolean isEmptyRange() {
+        return fromIndex == toIndex.get();
     }
 
     @Override
@@ -90,17 +87,28 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
     }
 
     @Override
+    public RFuture<Boolean> removeAsync(Object o, int count) {
+        if (isEmptyRange()) {
+            return new CompletableFutureWrapper<>(false);
+        }
+        return super.removeAsync(o, count);
+    }
+
+    @Override
     public RFuture<Boolean> containsAllAsync(Collection<?> c) {
+        if (isEmptyRange()) {
+            return new CompletableFutureWrapper<>(c.isEmpty());
+        }
         List<Object> params = new ArrayList<Object>();
         params.add(fromIndex);
         params.add(toIndex.get() - 1);
         encode(params, c);
         return commandExecutor.evalReadAsync(getRawName(), codec, RedisCommands.EVAL_BOOLEAN,
                 "local fromIndex = table.remove(ARGV, 1);" +
-                "local toIndex = table.remove(ARGV, 2);" +
+                "local toIndex = table.remove(ARGV, 1);" +
                 "local items = redis.call('lrange', KEYS[1], tonumber(fromIndex), tonumber(toIndex)) " +
                 "for i=1, #items do " +
-                    "for j = 1, #ARGV, 1 do " +
+                    "for j = #ARGV, 1, -1 do " +
                         "if items[i] == ARGV[j] then " +
                             "table.remove(ARGV, j) " +
                         "end " +
@@ -113,7 +121,7 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
     @Override
     public RFuture<Boolean> addAllAsync(Collection<? extends V> c) {
         if (c.isEmpty()) {
-            return RedissonPromise.newSucceededFuture(false);
+            return new CompletableFutureWrapper<>(false);
         }
 
         return addAllAsync(toIndex.get() - fromIndex, c);
@@ -124,7 +132,7 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
         checkIndex(index);
 
         if (coll.isEmpty()) {
-            return RedissonPromise.newSucceededFuture(false);
+            return new CompletableFutureWrapper<>(false);
         }
 
         if (index == 0) { // prepend elements to list
@@ -140,7 +148,7 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
         args.add(index);
         encode(args, coll);
         
-        return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_BOOLEAN,
+        return commandExecutor.evalWriteNoRetryAsync(getRawName(), codec, RedisCommands.EVAL_BOOLEAN,
                 "local ind = table.remove(ARGV, 1); " + // index is the first parameter
                         "local size = redis.call('llen', KEYS[1]); " +
                         "assert(tonumber(ind) <= size, 'index: ' .. ind .. ' but current size: ' .. size); " +
@@ -164,6 +172,10 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
     }
 
     private RFuture<Boolean> removeAllAsync(Collection<?> c, int count) {
+        Objects.requireNonNull(c);
+        if (isEmptyRange()) {
+            return new CompletableFutureWrapper<>(false);
+        }
         List<Object> params = new ArrayList<Object>();
         params.add(fromIndex);
         params.add(toIndex.get() - 1);
@@ -173,14 +185,14 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
         return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_BOOLEAN,
                 "local v = 0; " +
                 "local fromIndex = table.remove(ARGV, 1);" +
-                "local toIndex = table.remove(ARGV, 2);" +
-                "local count = table.remove(ARGV, 3);" +
+                "local toIndex = table.remove(ARGV, 1);" +
+                "local count = table.remove(ARGV, 1);" +
                 "local items = redis.call('lrange', KEYS[1], fromIndex, toIndex); " +
 
                 "for i=1, #items do " +
                     "for j = 1, #ARGV, 1 do " +
                         "if items[i] == ARGV[j] then " +
-                            "redis.call('lrem', KEYS[1], count, ARGV[i]); " +
+                            "redis.call('lrem', KEYS[1], count, ARGV[j]); " +
                             "v = 1; " +
                         "end; " +
                     "end; " +
@@ -191,6 +203,10 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
 
     @Override
     public RFuture<Boolean> retainAllAsync(Collection<?> c) {
+        Objects.requireNonNull(c);
+        if (isEmptyRange()) {
+            return new CompletableFutureWrapper<>(false);
+        }
         List<Object> params = new ArrayList<Object>();
         params.add(fromIndex);
         params.add(toIndex.get() - 1);
@@ -199,7 +215,7 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
         return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_BOOLEAN,
                 "local changed = 0 " +
                 "local fromIndex = table.remove(ARGV, 1);" +
-                "local toIndex = table.remove(ARGV, 2);" +
+                "local toIndex = table.remove(ARGV, 1);" +
                 "local items = redis.call('lrange', KEYS[1], fromIndex, toIndex) "
                    + "local i = 1 "
                    + "while i <= #items do "
@@ -230,7 +246,7 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
             return;
         }
 
-        get(commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_VOID,
+        get(commandExecutor.evalWriteNoRetryAsync(getRawName(), codec, RedisCommands.EVAL_VOID,
                         "local tail = redis.call('lrange', KEYS[1], ARGV[2], -1); " +
                         "redis.call('ltrim', KEYS[1], 0, ARGV[1] - 1); " +
                         "if #tail > 0 then " +
@@ -309,7 +325,7 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
             return get(f);
         }
 
-        RFuture<V> f = commandExecutor.evalWriteAsync(getRawName(), codec, EVAL_OBJECT,
+        RFuture<V> f = commandExecutor.evalWriteNoRetryAsync(getRawName(), codec, EVAL_OBJECT,
                 "local v = redis.call('lindex', KEYS[1], ARGV[1]); " +
                         "local tail = redis.call('lrange', KEYS[1], ARGV[1] + 1, -1);" +
                         "redis.call('ltrim', KEYS[1], 0, ARGV[1] - 1);" +
@@ -324,6 +340,9 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
     }
 
     public <R> RFuture<R> indexOfAsync(Object o, Convertor<R> convertor) {
+        if (isEmptyRange()) {
+            return new CompletableFutureWrapper<>(convertor.convert(-1L));
+        }
         return commandExecutor.evalReadAsync(getRawName(), codec, new RedisCommand<R>("EVAL", convertor),
                 "local items = redis.call('lrange', KEYS[1], tonumber(ARGV[2]), tonumber(ARGV[3])) " +
                 "for i=1,#items do " +
@@ -337,15 +356,18 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
 
     @Override
     public RFuture<Integer> lastIndexOfAsync(Object o) {
+        if (isEmptyRange()) {
+            return new CompletableFutureWrapper<>(-1);
+        }
         return commandExecutor.evalReadAsync(getRawName(), codec, RedisCommands.EVAL_INTEGER,
                 "local key = KEYS[1] " +
-                "local obj = ARGV[1] " +
+                "local obj = table.remove(ARGV, 1);" +
                 "local fromIndex = table.remove(ARGV, 1);" +
-                "local toIndex = table.remove(ARGV, 2);" +
-                "local items = redis.call('lrange', key, tonumber(fromIndex), tonumber(toIndexs)) " +
-                "for i = #items, 0, -1 do " +
+                "local toIndex = table.remove(ARGV, 1);" +
+                "local items = redis.call('lrange', key, fromIndex, toIndex) " +
+                "for i = #items, 1, -1 do " +
                     "if items[i] == obj then " +
-                        "return tonumber(ARGV[2]) + i - 1 " +
+                        "return tonumber(fromIndex) + i - 1; " +
                     "end; " +
                 "end; " +
                 "return -1; ",
@@ -359,7 +381,9 @@ public class RedissonSubList<V> extends RedissonList<V> implements RList<V> {
 
     @Override
     public ListIterator<V> listIterator(final int fromIndex) {
-        checkIndex(fromIndex);
+        if (!isEmptyRange() || fromIndex != this.fromIndex) {
+            checkIndex(fromIndex);
+        }
         return new ListIterator<V>() {
 
             private V prevCurrentValue;

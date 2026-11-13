@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,16 +19,17 @@ import org.apache.catalina.session.StandardSession;
 import org.redisson.api.RMap;
 import org.redisson.api.RSet;
 import org.redisson.api.RTopic;
+import org.redisson.client.protocol.Encoder;
 import org.redisson.tomcat.RedissonSessionManager.ReadMode;
 import org.redisson.tomcat.RedissonSessionManager.UpdateMode;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.security.Principal;
+import java.time.Duration;
 import java.util.*;
 import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -71,14 +72,16 @@ public class RedissonSession extends StandardSession {
     private Set<String> removedAttributes = Collections.emptySet();
 
     private final boolean broadcastSessionEvents;
+    private final boolean broadcastSessionUpdates;
 
-    public RedissonSession(RedissonSessionManager manager, ReadMode readMode, UpdateMode updateMode, boolean broadcastSessionEvents) {
+    public RedissonSession(RedissonSessionManager manager, ReadMode readMode, UpdateMode updateMode, boolean broadcastSessionEvents, boolean broadcastSessionUpdates) {
         super(manager);
         this.redissonManager = manager;
         this.readMode = readMode;
         this.updateMode = updateMode;
         this.topic = redissonManager.getTopic();
         this.broadcastSessionEvents = broadcastSessionEvents;
+        this.broadcastSessionUpdates = broadcastSessionUpdates;
         
         if (updateMode == UpdateMode.AFTER_REQUEST) {
             removedAttributes = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
@@ -177,13 +180,13 @@ public class RedissonSession extends StandardSession {
         if (broadcastSessionEvents) {
             RSet<String> set = redissonManager.getNotifiedNodes(id);
             set.add(redissonManager.getNodeId());
-            set.expire(60, TimeUnit.SECONDS);
+            set.expire(Duration.ofSeconds(60));
             map.fastPut(IS_EXPIRATION_LOCKED, true);
-            map.expire(60, TimeUnit.SECONDS);
+            map.expire(Duration.ofSeconds(60));
         } else {
             map.delete();
         }
-        if (readMode == ReadMode.MEMORY) {
+        if (readMode == ReadMode.MEMORY && this.broadcastSessionUpdates) {
             topic.publish(new AttributesClearMessage(redissonManager.getNodeId(), getId()));
         }
         map = null;
@@ -201,7 +204,7 @@ public class RedissonSession extends StandardSession {
             newMap.put(LAST_ACCESSED_TIME_ATTR, lastAccessedTime);
             newMap.put(THIS_ACCESSED_TIME_ATTR, thisAccessedTime);
             map.putAll(newMap);
-            if (readMode == ReadMode.MEMORY) {
+            if (readMode == ReadMode.MEMORY && this.broadcastSessionUpdates) {
                 topic.publish(createPutAllMessage(newMap));
             }
         }
@@ -210,30 +213,33 @@ public class RedissonSession extends StandardSession {
     @Override
     public void access() {
         super.access();
-        
-        if (map != null) {
-            fastPut(THIS_ACCESSED_TIME_ATTR, thisAccessedTime);
-            expireSession();
-        }
+
+        fastPut(THIS_ACCESSED_TIME_ATTR, thisAccessedTime);
+        expireSession();
+    }
+
+    public void superAccess() {
+        super.access();
+    }
+
+    public void superEndAccess() {
+        super.endAccess();
     }
 
     protected void expireSession() {
-        if (isExpirationLocked) {
+        RMap<String, Object> m = map;
+        if (isExpirationLocked || m == null) {
             return;
         }
         if (maxInactiveInterval >= 0) {
-            map.expire(maxInactiveInterval + 60, TimeUnit.SECONDS);
+            m.expire(Duration.ofSeconds(maxInactiveInterval + 60));
         }
     }
 
     protected AttributesPutAllMessage createPutAllMessage(Map<String, Object> newMap) {
-        Map<String, Object> map = new HashMap<String, Object>();
-        for (Entry<String, Object> entry : newMap.entrySet()) {
-            map.put(entry.getKey(), entry.getValue());
-        }
         try {
-            return new AttributesPutAllMessage(redissonManager.getNodeId(), getId(), map, this.map.getCodec().getMapValueEncoder());
-        } catch (IOException e) {
+            return new AttributesPutAllMessage(redissonManager, getId(), newMap, this.map.getCodec().getMapValueEncoder());
+        } catch (Exception e) {
             throw new IllegalStateException(e);
         }
     }
@@ -241,21 +247,21 @@ public class RedissonSession extends StandardSession {
     @Override
     public void setMaxInactiveInterval(int interval) {
         super.setMaxInactiveInterval(interval);
-        
-        if (map != null) {
-            fastPut(MAX_INACTIVE_INTERVAL_ATTR, maxInactiveInterval);
-            expireSession();
-        }
+
+        fastPut(MAX_INACTIVE_INTERVAL_ATTR, maxInactiveInterval);
+        expireSession();
     }
 
     private void fastPut(String name, Object value) {
-        if (map == null) {
+        RMap<String, Object> m = map;
+        if (m == null) {
             return;
         }
-        map.fastPut(name, value);
-        if (readMode == ReadMode.MEMORY) {
+        m.fastPut(name, value);
+        if (readMode == ReadMode.MEMORY && this.broadcastSessionUpdates) {
             try {
-                topic.publish(new AttributeUpdateMessage(redissonManager.getNodeId(), getId(), name, value, this.map.getCodec().getMapValueEncoder()));
+                Encoder encoder = m.getCodec().getMapValueEncoder();
+                topic.publish(new AttributeUpdateMessage(redissonManager.getNodeId(), getId(), name, value, encoder));
             } catch (IOException e) {
                 throw new IllegalStateException(e);
             }
@@ -301,9 +307,7 @@ public class RedissonSession extends StandardSession {
     public void setNew(boolean isNew) {
         super.setNew(isNew);
         
-        if (map != null) {
-            fastPut(IS_NEW_ATTR, isNew);
-        }
+        fastPut(IS_NEW_ATTR, isNew);
     }
     
     @Override
@@ -311,24 +315,20 @@ public class RedissonSession extends StandardSession {
         boolean oldValue = isNew;
         super.endAccess();
 
-        if (map != null) {
+        RMap<String, Object> m = map;
+        if (m != null) {
             Map<String, Object> newMap = new HashMap<>(3);
             if (isNew != oldValue) {
                 newMap.put(IS_NEW_ATTR, isNew);
             }
             newMap.put(LAST_ACCESSED_TIME_ATTR, lastAccessedTime);
             newMap.put(THIS_ACCESSED_TIME_ATTR, thisAccessedTime);
-            map.putAll(newMap);
-            if (readMode == ReadMode.MEMORY) {
+            m.putAll(newMap);
+            if (readMode == ReadMode.MEMORY && this.broadcastSessionUpdates) {
                 topic.publish(createPutAllMessage(newMap));
             }
             expireSession();
         }
-    }
-
-    
-    public void superSetAttribute(String name, Object value, boolean notify) {
-        super.setAttribute(name, value, notify);
     }
     
     @Override
@@ -338,7 +338,7 @@ public class RedissonSession extends StandardSession {
         if (value == null) {
             return;
         }
-        if (updateMode == UpdateMode.DEFAULT && map != null) {
+        if (updateMode == UpdateMode.DEFAULT) {
             fastPut(name, value);
         }
         if (readMode == ReadMode.REDIS) {
@@ -376,7 +376,7 @@ public class RedissonSession extends StandardSession {
     private void removeRedisAttribute(String name) {
         if (updateMode == UpdateMode.DEFAULT && map != null) {
             map.fastRemove(name);
-            if (readMode == ReadMode.MEMORY) {
+            if (readMode == ReadMode.MEMORY && this.broadcastSessionUpdates) {
                 topic.publish(new AttributeRemoveMessage(redissonManager.getNodeId(), getId(), new HashSet<String>(Arrays.asList(name))));
             }
         }
@@ -386,6 +386,35 @@ public class RedissonSession extends StandardSession {
         }
         if (updateMode == UpdateMode.AFTER_REQUEST) {
             removedAttributes.add(name);
+        }
+    }
+
+    @Override
+    public void setId(String id, boolean notify) {
+        if ((this.id != null) && (manager != null)) {
+            redissonManager.superRemove(this);
+            if (map == null) {
+                map = redissonManager.getMap(this.id);
+            }
+            String newName = redissonManager.getTomcatSessionKeyName(id);
+            if (!map.getName().equals(newName)) {
+                map.rename(newName);
+            }
+        }
+
+        boolean idWasNull = this.id == null;
+        this.id = id;
+
+        if (manager != null) {
+            if (idWasNull) {
+                redissonManager.add(this);
+            } else {
+                redissonManager.superAdd(this);
+            }
+        }
+
+        if (notify) {
+            tellNew();
         }
     }
 
@@ -414,7 +443,7 @@ public class RedissonSession extends StandardSession {
         if (readMode == ReadMode.MEMORY) {
             if (attrs != null) {
                 for (Entry<String, Object> entry : attrs.entrySet()) {
-                    newMap.put(entry.getKey(), entry.getValue());
+                    newMap.put(entry.getKey(), copy(entry.getValue()));
                 }
             }
         } else {
@@ -425,7 +454,7 @@ public class RedissonSession extends StandardSession {
         map.putAll(newMap);
         map.fastRemove(removedAttributes.toArray(new String[0]));
         
-        if (readMode == ReadMode.MEMORY) {
+        if (readMode == ReadMode.MEMORY && this.broadcastSessionUpdates) {
             topic.publish(createPutAllMessage(newMap));
             
             if (updateMode == UpdateMode.AFTER_REQUEST) {
@@ -439,23 +468,41 @@ public class RedissonSession extends StandardSession {
 
         expireSession();
     }
+
+    private Object copy(Object value) {
+        try {
+            if (value instanceof Collection) {
+                Collection newInstance = (Collection) value.getClass().getDeclaredConstructor().newInstance();
+                newInstance.addAll((Collection) value);
+                value = newInstance;
+            }
+            if (value instanceof Map) {
+                Map newInstance = (Map) value.getClass().getDeclaredConstructor().newInstance();
+                newInstance.putAll((Map) value);
+                value = newInstance;
+            }
+        } catch (Exception e) {
+            // can't be copied
+        }
+        return value;
+    }
     
     public void load(Map<String, Object> attrs) {
-        Long creationTime = (Long) attrs.remove(CREATION_TIME_ATTR);
+        Number creationTime = (Number) attrs.remove(CREATION_TIME_ATTR);
         if (creationTime != null) {
-            this.creationTime = creationTime;
+            this.creationTime = creationTime.longValue();
         }
-        Long lastAccessedTime = (Long) attrs.remove(LAST_ACCESSED_TIME_ATTR);
+        Number lastAccessedTime = (Number) attrs.remove(LAST_ACCESSED_TIME_ATTR);
         if (lastAccessedTime != null) {
-            this.lastAccessedTime = lastAccessedTime;
+            this.lastAccessedTime = lastAccessedTime.longValue();
         }
         Integer maxInactiveInterval = (Integer) attrs.remove(MAX_INACTIVE_INTERVAL_ATTR);
         if (maxInactiveInterval != null) {
             this.maxInactiveInterval = maxInactiveInterval;
         }
-        Long thisAccessedTime = (Long) attrs.remove(THIS_ACCESSED_TIME_ATTR);
+        Number thisAccessedTime = (Number) attrs.remove(THIS_ACCESSED_TIME_ATTR);
         if (thisAccessedTime != null) {
-            this.thisAccessedTime = thisAccessedTime;
+            this.thisAccessedTime = thisAccessedTime.longValue();
         }
         Boolean isValid = (Boolean) attrs.remove(IS_VALID_ATTR);
         if (isValid != null) {

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,22 +15,29 @@
  */
 package org.redisson.connection;
 
+import io.netty.channel.ChannelFuture;
 import org.redisson.api.NodeType;
 import org.redisson.api.RFuture;
 import org.redisson.client.RedisClient;
 import org.redisson.client.RedisConnection;
+import org.redisson.client.RedisException;
 import org.redisson.client.RedisPubSubConnection;
-import org.redisson.config.ReadMode;
-import org.redisson.pubsub.AsyncSemaphore;
+import org.redisson.client.protocol.CommandData;
+import org.redisson.client.protocol.RedisCommands;
+import org.redisson.config.MasterSlaveServersConfig;
+import org.redisson.misc.WrappedLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicLong;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
- * 
+ *
  * @author Nikita Koksharov
  *
  */
@@ -38,50 +45,77 @@ public class ClientConnectionsEntry {
 
     final Logger log = LoggerFactory.getLogger(getClass());
 
-    private final Queue<RedisPubSubConnection> allSubscribeConnections = new ConcurrentLinkedQueue<>();
-    private final Queue<RedisPubSubConnection> freeSubscribeConnections = new ConcurrentLinkedQueue<>();
-    private final AsyncSemaphore freeSubscribeConnectionsCounter;
+    private final ConnectionsHolder<RedisConnection> connectionsHolder;
 
-    private final Queue<RedisConnection> allConnections = new ConcurrentLinkedQueue<>();
-    private final Queue<RedisConnection> freeConnections = new ConcurrentLinkedQueue<>();
-    private final AsyncSemaphore freeConnectionsCounter;
+    private final ConnectionsHolder<RedisPubSubConnection> pubSubConnectionsHolder;
 
-    public enum FreezeReason {MANAGER, RECONNECT, SYSTEM}
+    private final TrackedConnectionsHolder trackedConnectionsHolder;
+
+    public enum FreezeReason {MANAGER, RECONNECT}
 
     private volatile FreezeReason freezeReason;
     final RedisClient client;
 
-    private volatile NodeType nodeType;
+    private final NodeType nodeType;
+    private final IdleConnectionWatcher idleConnectionWatcher;
     private final ConnectionManager connectionManager;
-
-    private final AtomicLong firstFailTime = new AtomicLong(0);
+    private final MasterSlaveServersConfig config;
 
     private volatile boolean initialized = false;
 
-    public ClientConnectionsEntry(RedisClient client, int poolMinSize, int poolMaxSize, int subscribePoolMinSize, int subscribePoolMaxSize,
-            ConnectionManager connectionManager, NodeType nodeType) {
+    private volatile String availabilityZone;
+
+    private volatile CompletableFuture<Void> availabilityZoneRead = CompletableFuture.completedFuture(null);
+
+    private final WrappedLock lock = new WrappedLock();
+
+    private final Map<RedisConnection, ConnectionsHolder<?>> connection2holder = new ConcurrentHashMap<>();
+
+    public ClientConnectionsEntry(RedisClient client, int poolMinSize, int poolMaxSize,
+                                  ConnectionManager connectionManager, NodeType nodeType, MasterSlaveServersConfig config) {
         this.client = client;
-        this.freeConnectionsCounter = new AsyncSemaphore(poolMaxSize);
+        this.config = config;
+        this.connectionsHolder = new ConnectionsHolder<>(client, poolMaxSize,
+                r -> reportFailure(r.connectAsync()),
+                connectionManager.getServiceManager(), true);
+        this.idleConnectionWatcher = connectionManager.getServiceManager().getConnectionWatcher();
         this.connectionManager = connectionManager;
         this.nodeType = nodeType;
-        this.freeSubscribeConnectionsCounter = new AsyncSemaphore(subscribePoolMaxSize);
+        this.pubSubConnectionsHolder = new ConnectionsHolder<>(client, config.getSubscriptionConnectionPoolSize(),
+                r -> reportFailure(r.connectPubSubAsync()),
+                connectionManager.getServiceManager(), false);
 
-        if (subscribePoolMaxSize > 0) {
-            connectionManager.getConnectionWatcher().add(subscribePoolMinSize, subscribePoolMaxSize, freeSubscribeConnections, freeSubscribeConnectionsCounter, c -> {
-                freeSubscribeConnections.remove(c);
-                return allSubscribeConnections.remove(c);
+        if (config.getSubscriptionConnectionPoolSize() > 0) {
+            idleConnectionWatcher.add(this, config.getSubscriptionConnectionMinimumIdleSize(),
+                                                config.getSubscriptionConnectionPoolSize(), pubSubConnectionsHolder);
+        }
+        idleConnectionWatcher.add(this, poolMinSize, poolMaxSize, connectionsHolder);
+
+        this.trackedConnectionsHolder = new TrackedConnectionsHolder(connectionsHolder);
+    }
+
+    private <C extends RedisConnection> CompletionStage<C> reportFailure(CompletionStage<C> connectFuture) {
+        if (nodeType == NodeType.SLAVE) {
+            connectFuture.whenComplete((c, e) -> {
+                if (e == null) {
+                    return;
+                }
+                try {
+                    client.getConfig().getFailedNodeDetector().onConnectFailed(e, client.getAddr());
+                } catch (Exception ex) {
+                    log.error("Unable to report connection failure of {}", client.getAddr(), ex);
+                }
             });
         }
-        connectionManager.getConnectionWatcher().add(poolMinSize, poolMaxSize, freeConnections, freeConnectionsCounter, c -> {
-                freeConnections.remove(c);
-                return allConnections.remove(c);
-            });
+        return connectFuture;
     }
-    
-    public boolean isMasterForRead() {
-        return getFreezeReason() == FreezeReason.SYSTEM
-                        && connectionManager.getConfig().getReadMode() == ReadMode.MASTER_SLAVE
-                            && getNodeType() == NodeType.MASTER;
+
+    public CompletableFuture<Void> initConnections(int minimumIdleSize) {
+        return connectionsHolder.initConnections(minimumIdleSize);
+    }
+
+    public CompletableFuture<Void> initPubSubConnections(int minimumIdleSize) {
+        return pubSubConnectionsHolder.initConnections(minimumIdleSize);
     }
 
     public boolean isInitialized() {
@@ -92,27 +126,111 @@ public class ClientConnectionsEntry {
         this.initialized = isInited;
     }
     
-    public void setNodeType(NodeType nodeType) {
-        this.nodeType = nodeType;
-    }
-
     public NodeType getNodeType() {
         return nodeType;
     }
 
-    public void resetFirstFail() {
-        firstFailTime.set(0);
+    public String getAvailabilityZone() {
+        return availabilityZone;
     }
 
-    public boolean isFailed() {
-        if (firstFailTime.get() != 0) {
-            return System.currentTimeMillis() - firstFailTime.get() > connectionManager.getConfig().getFailedSlaveCheckInterval(); 
-        }
-        return false;
+    public CompletableFuture<Void> getAvailabilityZoneRead() {
+        return availabilityZoneRead;
     }
-    
-    public void trySetupFistFail() {
-        firstFailTime.compareAndSet(0, System.currentTimeMillis());
+
+    public void discoverAvailabilityZone() {
+        if (config.getClientAvailabilityZone() == null || config.isSlaveNotUsed()) {
+            return;
+        }
+
+        CompletableFuture<Void> read = new CompletableFuture<>();
+        availabilityZoneRead = read;
+        readAvailabilityZone(read, 1);
+    }
+
+    private void readAvailabilityZone(CompletableFuture<Void> read, int attempt) {
+        if (isAvailabilityZoneReadOver(read)) {
+            read.complete(null);
+            return;
+        }
+
+        connectionsHolder.acquireConnection(RedisCommands.INFO_SERVER_AVAILABILITY_ZONE)
+                .whenComplete((connection, e) -> {
+                    if (e != null) {
+                        scheduleAvailabilityZoneRead(read, attempt, e);
+                        return;
+                    }
+
+                    if (isAvailabilityZoneReadOver(read)) {
+                        connectionsHolder.releaseConnection(this, connection);
+                        read.complete(null);
+                        return;
+                    }
+
+                    RFuture<String> infoFuture = connection.async(RedisCommands.INFO_SERVER_AVAILABILITY_ZONE);
+                    infoFuture.whenComplete((zone, ex) -> {
+                        connectionsHolder.releaseConnection(this, connection);
+
+                        if (ex != null) {
+                            String message = ex.getMessage();
+                            if (ex instanceof RedisException && message != null
+                                    && (message.startsWith("NOPERM") || message.startsWith("ERR unknown command"))) {
+                                log.warn("Unable to read availability zone of {}. The node keeps the zone {}, and without "
+                                                + "one the availability zone read modes use it only after nodes in the "
+                                                + "client's zone; it isn't read again until the node is added or unfreezed. "
+                                                + "The node answered: {}",
+                                        client.getAddr(), getAvailabilityZone(), message);
+                                read.complete(null);
+                                return;
+                            }
+                            scheduleAvailabilityZoneRead(read, attempt, ex);
+                            return;
+                        }
+
+                        if (availabilityZoneRead == read) {
+                            availabilityZone = zone;
+                            if (zone == null) {
+                                log.warn("{} reports no availability zone (Valkey 8.0+ reports its availability-zone config), "
+                                        + "so the availability zone read modes use it only after nodes in the client's zone", client.getAddr());
+                            } else if (attempt > 1) {
+                                log.info("{} reports availability zone {}, read on try {}", client.getAddr(), zone, attempt);
+                            } else {
+                                log.debug("{} reports availability zone {}", client.getAddr(), zone);
+                            }
+                        }
+                        read.complete(null);
+                    });
+                });
+    }
+
+    private void scheduleAvailabilityZoneRead(CompletableFuture<Void> read, int attempt, Throwable cause) {
+        if (isAvailabilityZoneReadOver(read)) {
+            read.complete(null);
+            return;
+        }
+
+        long interval = config.getFailedSlaveReconnectionInterval();
+        if (attempt == 1) {
+            log.warn("Unable to read availability zone of {}, keeping zone: {}, trying again every {} ms",
+                    client.getAddr(), getAvailabilityZone(), interval, cause);
+        } else {
+            log.debug("Unable to read availability zone of {} on try {}", client.getAddr(), attempt, cause);
+        }
+        connectionManager.getServiceManager().newTimeout(t -> readAvailabilityZone(read, attempt + 1),
+                interval, TimeUnit.MILLISECONDS);
+    }
+
+    private boolean isAvailabilityZoneReadOver(CompletableFuture<Void> read) {
+        return availabilityZoneRead != read
+                || isFreezed()
+                || client.isShutdown()
+                || connectionManager.getServiceManager().isShuttingDown();
+    }
+
+    public CompletableFuture<Void> shutdownAsync() {
+        idleConnectionWatcher.remove(this);
+        availabilityZoneRead.complete(null);
+        return client.shutdownAsync().toCompletableFuture();
     }
 
     public RedisClient getClient() {
@@ -134,140 +252,149 @@ public class ClientConnectionsEntry {
         return freezeReason;
     }
 
-    public void reset() {
-        freeConnectionsCounter.removeListeners();
-        freeSubscribeConnectionsCounter.removeListeners();
+    public WrappedLock getLock() {
+        return lock;
     }
 
-    public int getFreeAmount() {
-        return freeConnectionsCounter.getCounter();
-    }
+    public void reattachPubSub() {
+        pubSubConnectionsHolder.getFreeConnectionsCounter().removeListeners();
 
-    public void acquireConnection(Runnable runnable) {
-        freeConnectionsCounter.acquire(runnable);
-    }
-    
-    public void removeConnection(Runnable runnable) {
-        freeConnectionsCounter.remove(runnable);
-    }
-
-    public void releaseConnection() {
-        freeConnectionsCounter.release();
-    }
-
-    public RedisConnection pollConnection() {
-        return freeConnections.poll();
-    }
-
-    public void releaseConnection(RedisConnection connection) {
-        if (connection.isClosed()) {
-            return;
-        }
-
-        if (client != connection.getRedisClient()) {
+        for (RedisPubSubConnection connection : pubSubConnectionsHolder.getAllConnections()) {
             connection.closeAsync();
+            connectionManager.getSubscribeService().reattachPubSub(connection);
+        }
+
+        log.debug("{} PubSub connections to {} have been closed", pubSubConnectionsHolder.getAllConnections().size(), client.getAddr());
+
+        pubSubConnectionsHolder.getFreeConnections().clear();
+        pubSubConnectionsHolder.getAllConnections().clear();
+    }
+
+    public void nodeDown() {
+        nodeDown(connectionsHolder);
+        reattachPubSub();
+    }
+
+    protected final void nodeDown(ConnectionsHolder<RedisConnection> connectionsHolder) {
+        connectionsHolder.getFreeConnectionsCounter().removeListeners();
+
+        for (RedisConnection connection : connectionsHolder.getAllConnections()) {
+            connection.closeAsync();
+            reattachBlockingQueue(connection.getCurrentCommand());
+        }
+
+        log.debug("{} connections to {} have been closed", connectionsHolder.getAllConnections().size(), client.getAddr());
+
+        connectionsHolder.getFreeConnections().clear();
+        connectionsHolder.getAllConnections().clear();
+    }
+
+    void reattachBlockingQueue(CommandData<?, ?> commandData) {
+        if (commandData == null
+                || !commandData.isBlockingCommand()
+                || commandData.getPromise().isDone()) {
             return;
         }
 
-        connection.setLastUsageTime(System.nanoTime());
-        freeConnections.add(connection);
-    }
+        String key = getKey(commandData);
 
-    public RFuture<RedisConnection> connect() {
-        RFuture<RedisConnection> future = client.connectAsync();
-        future.onComplete((conn, e) -> {
+        MasterSlaveEntry entry = connectionManager.getEntry(key);
+        if (entry == null) {
+            log.debug("Unable to get entry for {} during blocking command reattach {}", key, commandData);
+            connectionManager.getServiceManager().newTimeout(timeout ->
+                    reattachBlockingQueue(commandData), 1, TimeUnit.SECONDS);
+            return;
+        }
+
+        CompletableFuture<RedisConnection> newConnectionFuture = entry.connectionWriteOp(commandData.getCommand());
+        newConnectionFuture.whenComplete((newConnection, e) -> {
             if (e != null) {
+                log.debug("Unable to acquire connection during blocking command reattach {}", commandData, e);
+                connectionManager.getServiceManager().newTimeout(timeout ->
+                        reattachBlockingQueue(commandData), 1, TimeUnit.SECONDS);
                 return;
             }
-            
-            onConnect(conn);
-            log.debug("new connection created: {}", conn);
-            
-            allConnections.add(conn);
-        });
-        return future;
-    }
-    
-    private void onConnect(final RedisConnection conn) {
-        conn.setConnectedListener(new Runnable() {
-            @Override
-            public void run() {
-                if (!connectionManager.isShuttingDown()) {
-                    connectionManager.getConnectionEventsHub().fireConnect(conn.getRedisClient().getAddr());
+
+            commandData.getPromise().whenComplete((r, ex) -> {
+                entry.releaseWrite(newConnection);
+            });
+
+            ChannelFuture channelFuture = newConnection.send(commandData);
+            channelFuture.addListener(future -> {
+                if (!future.isSuccess()) {
+                    log.debug("Unable to send a command during blocking command reattach {}", commandData, future.cause());
+                    connectionManager.getServiceManager().newTimeout(timeout ->
+                            reattachBlockingQueue(commandData), 1, TimeUnit.SECONDS);
+                    return;
                 }
-            }
+                log.info("command '{}' has been resent to '{}'", commandData, newConnection.getRedisClient());
+            });
         });
-        conn.setDisconnectedListener(new Runnable() {
-            @Override
-            public void run() {
-                if (!connectionManager.isShuttingDown()) {
-                    connectionManager.getConnectionEventsHub().fireDisconnect(conn.getRedisClient().getAddr());
+    }
+
+    private String getKey(CommandData<?, ?> commandData) {
+        String key = null;
+        for (int i = 0; i < commandData.getParams().length; i++) {
+            Object param = commandData.getParams()[i];
+            if ("STREAMS".equals(param)) {
+                Object k = commandData.getParams()[i+1];
+                if (k instanceof byte[]) {
+                    key = new String((byte[]) k, StandardCharsets.UTF_8);
+                } else {
+                    key = (String) k;
                 }
+                break;
             }
-        });
-        
-        connectionManager.getConnectionEventsHub().fireConnect(conn.getRedisClient().getAddr());
-    }
-
-    public RFuture<RedisPubSubConnection> connectPubSub() {
-        RFuture<RedisPubSubConnection> future = client.connectPubSubAsync();
-        future.onComplete((res, e) -> {
-            if (e != null) {
-                return;
+        }
+        if (key == null) {
+            Object k = commandData.getParams()[0];
+            if (k instanceof byte[]) {
+                key = new String((byte[]) k, StandardCharsets.UTF_8);
+            } else {
+                key = (String) k;
             }
-            
-            RedisPubSubConnection conn = future.getNow();
-            onConnect(conn);
-            log.debug("new pubsub connection created: {}", conn);
-
-            allSubscribeConnections.add(conn);
-        });
-        return future;
-    }
-    
-    public Queue<RedisConnection> getAllConnections() {
-        return allConnections;
-    }
-
-    public Queue<RedisPubSubConnection> getAllSubscribeConnections() {
-        return allSubscribeConnections;
-    }
-
-    public RedisPubSubConnection pollSubscribeConnection() {
-        return freeSubscribeConnections.poll();
-    }
-
-    public void releaseSubscribeConnection(RedisPubSubConnection connection) {
-        if (connection.isClosed()) {
-            return;
         }
+        return key;
+    }
 
-        if (client != connection.getRedisClient()) {
-            connection.closeAsync();
-            return;
+    public ConnectionsHolder<RedisConnection> getConnectionsHolder() {
+        return connectionsHolder;
+    }
+
+    public TrackedConnectionsHolder getTrackedConnectionsHolder() {
+        return trackedConnectionsHolder;
+    }
+
+    public ConnectionsHolder<RedisPubSubConnection> getPubSubConnectionsHolder() {
+        return pubSubConnectionsHolder;
+    }
+
+    public void addHandler(RedisConnection connection, ConnectionsHolder<?> handler) {
+        connection2holder.put(connection, handler);
+    }
+
+    public <T extends RedisConnection> void returnConnection(T connection) {
+        ConnectionsHolder<T> handler;
+        if (connection.getUsage() > 1) {
+            handler = (ConnectionsHolder<T>) connection2holder.get(connection);
+        } else {
+            handler = (ConnectionsHolder<T>) connection2holder.remove(connection);
         }
-        
-        connection.setLastUsageTime(System.nanoTime());
-        freeSubscribeConnections.add(connection);
-    }
-
-    public void acquireSubscribeConnection(Runnable runnable) {
-        freeSubscribeConnectionsCounter.acquire(runnable);
-    }
-
-    public void releaseSubscribeConnection() {
-        freeSubscribeConnectionsCounter.release();
+        if (handler != null) {
+            handler.releaseConnection(this, connection);
+        }
     }
 
     @Override
     public String toString() {
-        return "[freeSubscribeConnectionsAmount=" + freeSubscribeConnections.size()
-                + ", freeSubscribeConnectionsCounter=" + freeSubscribeConnectionsCounter
-                + ", freeConnectionsAmount=" + freeConnections.size() + ", freeConnectionsCounter="
-                + freeConnectionsCounter + ", freezeReason=" + freezeReason
-                + ", client=" + client + ", nodeType=" + nodeType + ", firstFail=" + firstFailTime
-                + "]";
+        return "ClientConnectionsEntry{" +
+                "connectionsHolder=" + connectionsHolder +
+                ", pubSubConnectionsHolder=" + pubSubConnectionsHolder +
+                ", freezeReason=" + freezeReason +
+                ", client=" + client +
+                ", nodeType=" + nodeType +
+                ", availabilityZone=" + availabilityZone +
+                ", initialized=" + initialized +
+                '}';
     }
-
 }
-

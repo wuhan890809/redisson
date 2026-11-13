@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,8 +26,12 @@ public class RedissonListMultimapIterator<K, V, M> extends RedissonMultiMapItera
         super(map, commandExecutor, codec);
     }
 
+    public RedissonListMultimapIterator(RedissonMultimap<K, V> map, CommandAsyncExecutor commandExecutor, Codec codec, int count) {
+        super(map, commandExecutor, codec, count);
+    }
+
     @Override
-    protected Iterator<V> getIterator(String name) {
+    protected Iterator<V> getIterator(String name, int count) {
         RedissonList<V> set = new RedissonList<V>(codec, commandExecutor, map.getValuesName(name), null);
         return set.iterator();
     }

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
  */
 package org.redisson.client.protocol.convertor;
 
-import org.redisson.api.StreamMessageId;
+import org.redisson.api.stream.StreamMessageId;
 
 /**
  * 
@@ -29,7 +29,7 @@ public class StreamIdConvertor implements Convertor<StreamMessageId> {
     @Override
     public StreamMessageId convert(Object id) {
         String[] parts = id.toString().split("-");
-        return new StreamMessageId(Long.valueOf(parts[0]), Long.valueOf(parts[1]));
+        return new StreamMessageId(Long.parseLong(parts[0]), Long.parseLong(parts[1]));
     }
 
 }

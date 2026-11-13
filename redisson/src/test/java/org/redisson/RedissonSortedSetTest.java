@@ -1,23 +1,61 @@
 package org.redisson;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Set;
-import java.util.SortedSet;
-import java.util.TreeSet;
-import java.util.concurrent.ExecutionException;
+import java.time.Duration;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.redisson.api.RFuture;
-import org.redisson.api.RSortedSet;
+import org.redisson.api.*;
 import org.redisson.client.codec.LongCodec;
+import org.redisson.client.codec.StringCodec;
+import org.redisson.config.Config;
+import org.redisson.config.NameMapper;
 
-public class RedissonSortedSetTest extends BaseTest {
+public class RedissonSortedSetTest extends RedisDockerTest {
+
+    @Test
+    public void testNameMapper() {
+        testInCluster(client -> {
+            Config config = client.getConfig();
+            config.useClusterServers()
+                    .setNameMapper(new NameMapper() {
+                        @Override
+                        public String map(String name) {
+                            return name + ":suffix:";
+                        }
+
+                        @Override
+                        public String unmap(String name) {
+                            return name.replace(":suffix:", "");
+                        }
+                    });
+            RedissonClient redisson = Redisson.create(config);
+
+            RSortedSet<Long> set = redisson.getSortedSet("simple", LongCodec.INSTANCE);
+            set.add(2L);
+            set.add(0L);
+            set.add(1L);
+            set.add(5L);
+
+            assertThat(set.first()).isEqualTo(0L);
+            assertThat(set.last()).isEqualTo(5L);
+
+            assertThat(set.readAll()).containsExactly(0L, 1L, 2L, 5L);
+            set.delete();
+
+            assertThat(redisson.getKeys().count()).isZero();
+            redisson.shutdown();
+        });
+    }
+
 
     @Test
     public void test1() {
@@ -29,7 +67,7 @@ public class RedissonSortedSetTest extends BaseTest {
         
         assertThat(set.readAll()).containsExactly(0L, 1L, 2L, 5L);
     }
-    
+
     @Test
     public void testReadAll() {
         RSortedSet<Integer> set = redisson.getSortedSet("simple");
@@ -116,12 +154,12 @@ public class RedissonSortedSetTest extends BaseTest {
     public void testIteratorSequence() {
         Set<Integer> set = redisson.getSortedSet("set");
         for (int i = 0; i < 1000; i++) {
-            set.add(Integer.valueOf(i));
+            set.add(i);
         }
 
         Set<Integer> setCopy = new HashSet<Integer>();
         for (int i = 0; i < 1000; i++) {
-            setCopy.add(Integer.valueOf(i));
+            setCopy.add(i);
         }
         
         checkIterator(set, setCopy);
@@ -398,5 +436,122 @@ public class RedissonSortedSetTest extends BaseTest {
         Assertions.assertEquals(5, set.size());
     }
 
+    @Test
+    public void testDistributedIterator() {
+        RSortedSet<String> set = redisson.getSortedSet("set", StringCodec.INSTANCE);
+
+        // populate set with elements
+        List<String> strings = IntStream.range(0, 128).mapToObj(i -> "one-" + i).collect(Collectors.toList());
+        set.addAll(strings);
+
+        Iterator<String> stringIterator = set.distributedIterator("iterator_{set}", 10);
+
+        // read some elements using iterator
+        List<String> result = new ArrayList<>();
+        for (int i = 0; i < 64; i++) {
+            if (stringIterator.hasNext()) {
+                result.add(stringIterator.next());
+            }
+        }
+
+        // create another iterator instance using the same name
+        RSortedSet<String> set2 = redisson.getSortedSet("set", StringCodec.INSTANCE);
+        Iterator<String> stringIterator2 = set2.distributedIterator("iterator_{set}", 10);
+
+        assertTrue(stringIterator2.hasNext());
+
+        // read all remaining elements
+        stringIterator2.forEachRemaining(result::add);
+        stringIterator.forEachRemaining(result::add);
+
+        assertThat(result).containsAll(strings);
+        assertThat(result).hasSize(strings.size());
+    }
+
+    @Test
+    public void testPollFirst() throws InterruptedException {
+        RSortedSet<Integer> set = redisson.getSortedSet("set");
+        set.add(3);
+        set.add(1);
+        set.add(2);
+        assertThat(set.pollFirst()).isEqualTo(1);
+        assertThat(set.pollFirst(2)).containsExactly(2, 3);
+
+        long s = System.currentTimeMillis();
+        assertThat(set.pollFirst(Duration.ofSeconds(5))).isNull();
+        Assertions.assertTrue(System.currentTimeMillis() - s > 4900);
+
+        set.add(5);
+        set.add(3);
+        set.add(4);
+
+        assertThat(set.pollFirst(Duration.ofSeconds(2), 2)).containsExactly(3, 4);
+        assertThat(set.pollFirst(Duration.ofSeconds(2))).isEqualTo(5);
+
+        final AtomicBoolean executed = new AtomicBoolean();
+        Thread t1 = new Thread(() -> {
+            long start = System.currentTimeMillis();
+            List<Integer> a = set.pollFirst(Duration.ofSeconds(2), 2);
+            assertThat(a).containsExactly(4);
+            Assertions.assertTrue(System.currentTimeMillis() - start < 2000);
+            executed.set(true);
+        });
+
+        t1.start();
+        Thread.sleep(1000);
+        set.add(4);
+        await().atMost(5, TimeUnit.SECONDS).untilTrue(executed);
+    }
+
+    @Test
+    public void testPollLast() throws InterruptedException {
+        RSortedSet<Integer> set = redisson.getSortedSet("set");
+        set.add(3);
+        set.add(1);
+        set.add(2);
+        assertThat(set.pollLast()).isEqualTo(3);
+        assertThat(set.pollLast(2)).containsExactly(2, 1);
+
+        long s = System.currentTimeMillis();
+        assertThat(set.pollLast(Duration.ofSeconds(5))).isNull();
+        Assertions.assertTrue(System.currentTimeMillis() - s > 4900);
+
+        set.add(5);
+        set.add(3);
+        set.add(4);
+
+        assertThat(set.pollLast(Duration.ofSeconds(2), 2)).containsExactly(5, 4);
+        assertThat(set.pollLast(Duration.ofSeconds(2))).isEqualTo(3);
+
+        final AtomicBoolean executed = new AtomicBoolean();
+        Thread t1 = new Thread(() -> {
+            long start = System.currentTimeMillis();
+            List<Integer> a = set.pollLast(Duration.ofSeconds(2), 2);
+            assertThat(a).containsExactly(4);
+            Assertions.assertTrue(System.currentTimeMillis() - start < 2000);
+            executed.set(true);
+        });
+
+        t1.start();
+        Thread.sleep(1000);
+        set.add(4);
+        await().atMost(5, TimeUnit.SECONDS).untilTrue(executed);
+
+    }
+
+    @Test
+    public void testComparator() {
+        RSortedSet<Integer> set1 = redisson.getSortedSet("test");
+        set1.trySetComparator(Comparator.nullsFirst(Comparator.naturalOrder()));
+        set1.add(3);
+        set1.add(1);
+        set1.add(2);
+        assertThat(set1).containsExactly(1, 2, 3);
+
+        RSortedSet<Integer> set2 = redisson.getSortedSet("test");
+        set2.add(4);
+
+        assertThat(set2).containsExactly(1, 2, 3, 4);
+    }
 
 }

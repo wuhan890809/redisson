@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@ package org.redisson;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import org.redisson.api.RFuture;
 import org.redisson.api.RRingBuffer;
@@ -29,7 +31,7 @@ import org.redisson.client.protocol.RedisCommands;
 import org.redisson.client.protocol.RedisStrictCommand;
 import org.redisson.client.protocol.convertor.IntegerReplayConvertor;
 import org.redisson.command.CommandAsyncExecutor;
-import org.redisson.misc.RedissonPromise;
+import org.redisson.misc.CompletableFutureWrapper;
 
 /**
  * 
@@ -67,8 +69,10 @@ public class RedissonRingBuffer<V> extends RedissonQueue<V> implements RRingBuff
     public RFuture<Void> setCapacityAsync(int capacity) {
         return commandExecutor.evalWriteAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_VOID,
                 "redis.call('set', KEYS[2], ARGV[1]); " +
-                      "local len = redis.call('llen', KEYS[1]); " +
-                      "redis.call('ltrim', KEYS[1], len - tonumber(ARGV[1]), len - 1); ",
+                        "local len = redis.call('llen', KEYS[1]); " +
+                        "if len > tonumber(ARGV[1]) then " +
+                            "redis.call('ltrim', KEYS[1], len - tonumber(ARGV[1]), -1); " +
+                        "end; ",
              Arrays.asList(getRawName(), settingsName), capacity);
     }
 
@@ -79,7 +83,7 @@ public class RedissonRingBuffer<V> extends RedissonQueue<V> implements RRingBuff
 
     @Override
     public RFuture<Boolean> addAsync(V e) {
-        return commandExecutor.evalWriteAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+        return commandExecutor.evalWriteNoRetryAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
                 "local limit = redis.call('get', KEYS[2]); "
               + "assert(limit ~= false, 'RingBuffer capacity is not defined'); "
               + "local size = redis.call('rpush', KEYS[1], ARGV[1]); "
@@ -94,12 +98,12 @@ public class RedissonRingBuffer<V> extends RedissonQueue<V> implements RRingBuff
     @Override
     public RFuture<Boolean> addAllAsync(Collection<? extends V> c) {
         if (c.isEmpty()) {
-            return RedissonPromise.newSucceededFuture(false);
+            return new CompletableFutureWrapper<>(false);
         }
 
         List<Object> args = new ArrayList<>(c.size());
         encode(args, c);
-        return commandExecutor.evalWriteAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+        return commandExecutor.evalWriteNoRetryAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
                 "local limit = redis.call('get', KEYS[2]); "
               + "assert(limit ~= false, 'RingBuffer capacity is not defined'); "
 
@@ -141,5 +145,71 @@ public class RedissonRingBuffer<V> extends RedissonQueue<V> implements RRingBuff
     public int capacity() {
         return get(capacityAsync());
     }
-    
+
+    @Override
+    public List<V> readNewest(int count) {
+        return get(readNewestAsync(count));
+    }
+
+    @Override
+    public RFuture<List<V>> readNewestAsync(int count) {
+        if (count <= 0) {
+            return new CompletableFutureWrapper<>(Collections.<V>emptyList());
+        }
+        return rangeAsync(-count, -1);
+    }
+
+    @Override
+    public List<V> readOldest(int count) {
+        return get(readOldestAsync(count));
+    }
+
+    @Override
+    public RFuture<List<V>> readOldestAsync(int count) {
+        if (count <= 0) {
+            return new CompletableFutureWrapper<>(Collections.<V>emptyList());
+        }
+        return rangeAsync(0, count - 1);
+    }
+
+    @Override
+    public V peekLast() {
+        return get(peekLastAsync());
+    }
+
+    @Override
+    public RFuture<V> peekLastAsync() {
+        return getAsync(-1);
+    }
+
+    @Override
+    public RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit, String param, String... keys) {
+        return super.expireAsync(timeToLive, timeUnit, param,
+                getRawName(), settingsName);
+    }
+
+    @Override
+    protected RFuture<Boolean> blessKeysAsync(String subcommand, String... keys) {
+        return super.blessKeysAsync(subcommand, getRawName(), settingsName);
+    }
+
+    @Override
+    protected RFuture<Boolean> expireAtAsync(long timestamp, String param, String... keys) {
+        return super.expireAtAsync(timestamp, param, getRawName(), settingsName);
+    }
+
+    @Override
+    public RFuture<Boolean> clearExpireAsync() {
+        return clearExpireAsync(getRawName(), settingsName);
+    }
+
+    @Override
+    public RFuture<Boolean> deleteAsync() {
+        return super.deleteAsync(getRawName(), settingsName);
+    }
+
+    @Override
+    public void clear() {
+        get(commandExecutor.writeAsync(getRawName(), RedisCommands.DEL_VOID, getRawName()));
+    }
 }

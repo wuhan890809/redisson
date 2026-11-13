@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,17 +15,18 @@
  */
 package org.redisson.rx;
 
-import java.util.concurrent.Callable;
-
-import org.redisson.api.RFuture;
+import io.reactivex.rxjava3.core.Flowable;
+import io.reactivex.rxjava3.processors.ReplayProcessor;
+import org.redisson.api.options.ObjectParams;
+import org.redisson.command.CommandAsyncExecutor;
 import org.redisson.command.CommandAsyncService;
 import org.redisson.connection.ConnectionManager;
-
-import io.reactivex.rxjava3.core.Flowable;
-import io.reactivex.rxjava3.functions.Action;
-import io.reactivex.rxjava3.functions.LongConsumer;
-import io.reactivex.rxjava3.processors.ReplayProcessor;
 import org.redisson.liveobject.core.RedissonObjectBuilder;
+
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  *
@@ -34,43 +35,62 @@ import org.redisson.liveobject.core.RedissonObjectBuilder;
  */
 public class CommandRxService extends CommandAsyncService implements CommandRxExecutor {
 
-    public CommandRxService(ConnectionManager connectionManager, RedissonObjectBuilder objectBuilder) {
+    CommandRxService(CommandAsyncExecutor executor, boolean trackChanges) {
+        super(executor, trackChanges);
+    }
+
+    CommandRxService(ConnectionManager connectionManager, RedissonObjectBuilder objectBuilder) {
         super(connectionManager, objectBuilder, RedissonObjectBuilder.ReferenceType.RXJAVA);
     }
 
+    CommandRxService(CommandAsyncExecutor executor, ObjectParams objectParams) {
+        super(executor, objectParams);
+    }
+
     @Override
-    public <R> Flowable<R> flowable(Callable<RFuture<R>> supplier) {
+    public CommandRxExecutor copy(boolean trackChanges) {
+        return new CommandRxService(this, trackChanges);
+    }
+
+    @Override
+    public CommandRxExecutor copy(ObjectParams objectParams) {
+        return new CommandRxService(this, objectParams);
+    }
+
+    @Override
+    public <R> Flowable<R> flowable(Callable<CompletionStage<R>> supplier) {
         ReplayProcessor<R> p = ReplayProcessor.create();
-        return p.doOnRequest(new LongConsumer() {
-            @Override
-            public void accept(long t) throws Exception {
-                RFuture<R> future;
-                try {
-                    future = supplier.call();
-                } catch (Exception e) {
-                    p.onError(e);
-                    return;
-                }
-                p.doOnCancel(new Action() {
-                    @Override
-                    public void run() throws Exception {
-                        future.cancel(true);
+        AtomicReference<CompletionStage<R>> futureRef = new AtomicReference<>();
+        return p.doOnRequest(t -> {
+                    CompletionStage<R> future;
+                    try {
+                        future = supplier.call();
+                        futureRef.set(future);
+                    } catch (Exception e) {
+                        p.onError(e);
+                        return;
+                    }
+
+                    future.whenComplete((res, e) -> {
+                       if (e != null) {
+                           if (e instanceof CompletionException) {
+                               e = e.getCause();
+                           }
+                           p.onError(e);
+                           return;
+                       }
+
+                       if (res != null) {
+                           p.onNext(res);
+                       }
+                       p.onComplete();
+                    });
+                }).doOnCancel(() -> {
+                    CompletionStage<R> future = futureRef.get();
+                    if (future != null) {
+                        future.toCompletableFuture().cancel(true);
                     }
                 });
-                
-                future.onComplete((res, e) -> {
-                   if (e != null) {
-                       p.onError(e);
-                       return;
-                   }
-                   
-                   if (res != null) {
-                       p.onNext(res);
-                   }
-                   p.onComplete();
-                });
-            }
-        });
     }
 
 }

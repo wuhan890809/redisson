@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 package org.redisson.api;
+
+import org.redisson.api.queue.QueueMoveElementsArgs;
 
 import java.util.List;
 
@@ -76,19 +78,50 @@ public interface RQueueAsync<V> extends RCollectionAsync<V> {
     RFuture<List<V>> pollAsync(int limit);
 
     /**
+     * Retrieves and removes the head elements of this queue
+     * and adds them at the tail of <code>queueName</code>.
+     * Returns moved elements.
+     * <p>
+     * Code example:
+     * <pre>
+     * RFuture&lt;List&lt;V&gt;&gt; future = queue.moveAsync(QueueMoveElementsArgs.to("myQueue")
+     *                                                              .count(10));
+     *
+     * RFuture&lt;List&lt;V&gt;&gt; future = queue.moveAsync(QueueMoveElementsArgs.to("myQueue")
+     *                                                              .exactly(10));
+     * </pre>
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param args - arguments object
+     * @return moved elements
+     */
+    RFuture<List<V>> moveAsync(QueueMoveElementsArgs args);
+
+    /**
      * Adds object event listener
      *
-     * @see org.redisson.api.ExpiredObjectListener
-     * @see org.redisson.api.DeletedObjectListener
+     * @see org.redisson.api.listener.TrackingListener
      * @see org.redisson.api.listener.ListAddListener
-     * @see org.redisson.api.listener.ListInsertListener
-     * @see org.redisson.api.listener.ListSetListener
      * @see org.redisson.api.listener.ListRemoveListener
      * @see org.redisson.api.listener.ListTrimListener
+     * @see org.redisson.api.listener.ListSetListener
+     * @see org.redisson.api.listener.ListInsertListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
      *
      * @param listener - object event listener
      * @return listener id
      */
     RFuture<Integer> addListenerAsync(ObjectListener listener);
+
+    /**
+     * Returns index of <code>element</code> or
+     * -1 if element isn't found
+     *
+     * @param element to find
+     * @return index of -1 if element isn't found
+     */
+    RFuture<Integer> indexOfAsync(V element);
 
 }

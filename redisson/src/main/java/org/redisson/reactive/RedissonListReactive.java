@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,17 +15,15 @@
  */
 package org.redisson.reactive;
 
-import java.util.function.Consumer;
-import java.util.function.LongConsumer;
-
 import org.reactivestreams.Publisher;
 import org.redisson.RedissonList;
 import org.redisson.api.RFuture;
-import org.redisson.api.RListAsync;
+import org.redisson.api.RList;
 import org.redisson.client.codec.Codec;
-
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
+
+import java.util.function.LongConsumer;
 
 /**
  * Distributed and concurrent implementation of {@link java.util.List}
@@ -36,9 +34,9 @@ import reactor.core.publisher.FluxSink;
  */
 public class RedissonListReactive<V> {
 
-    private final RListAsync<V> instance;
+    private final RList<V> instance;
     
-    public RedissonListReactive(RListAsync<V> instance) {
+    public RedissonListReactive(RList<V> instance) {
         this.instance = instance;
     }
 
@@ -49,7 +47,7 @@ public class RedissonListReactive<V> {
     public RedissonListReactive(Codec codec, CommandReactiveExecutor commandExecutor, String name) {
         this.instance = new RedissonList<V>(codec, commandExecutor, name, null);
     }
-    
+
     public Publisher<V> descendingIterator() {
         return iterator(-1, false);
     }
@@ -67,61 +65,69 @@ public class RedissonListReactive<V> {
     }
 
     private Publisher<V> iterator(int startIndex, boolean forward) {
-        return Flux.create(new Consumer<FluxSink<V>>() {
+        return Flux.create(emitter -> emitter.onRequest(new LongConsumer() {
+
+            int currentIndex = startIndex;
+            volatile boolean maxAccepted;
 
             @Override
-            public void accept(FluxSink<V> emitter) {
-                emitter.onRequest(new LongConsumer() {
-                    
-                    int currentIndex = startIndex;
-                    
-                    @Override
-                    public void accept(long value) {
-                        onRequest(forward, emitter, value);
-                    }
-                    
-                    protected void onRequest(boolean forward, FluxSink<V> emitter, long n) {
-                        instance.getAsync(currentIndex).onComplete((value, e) -> {
-                                if (e != null) {
-                                    emitter.error(e);
-                                    return;
-                                }
-
-                                if (value != null) {
-                                    emitter.next(value);
-                                    if (forward) {
-                                        currentIndex++;
-                                    } else {
-                                        currentIndex--;
-                                    }
-                                }
-
-                                if (value == null) {
-                                    emitter.complete();
-                                    return;
-                                }
-                                if (n-1 == 0) {
-                                    return;
-                                }
-                                onRequest(forward, emitter, n-1);
-                        });
-                    }
-                });
-                
+            public void accept(long value) {
+                if (Long.MAX_VALUE == value) {
+                    maxAccepted = true;
+                }
+                if (maxAccepted && value != Long.MAX_VALUE) {
+                    return;
+                }
+                onRequest(forward, emitter, value);
             }
 
-        });
+            private void onRequest(boolean forward1, FluxSink<V> emitter, long n) {
+                getAsync(currentIndex).whenComplete((value, e) -> {
+                        if (e != null) {
+                            emitter.error(e);
+                            return;
+                        }
+
+                        if (value != null) {
+                            emitter.next(value);
+                            if (forward1) {
+                                currentIndex++;
+                            } else {
+                                currentIndex--;
+                            }
+                        }
+
+                        if (value == null) {
+                            emitter.complete();
+                            return;
+                        }
+                        if (n-1 == 0) {
+                            return;
+                        }
+                        onRequest(forward1, emitter, n-1);
+                });
+            }
+
+        }));
     }
-    
+
+    RFuture<V> getAsync(int currentIndex) {
+        return instance.getAsync(currentIndex);
+    }
+
     public Publisher<Boolean> addAll(Publisher<? extends V> c) {
         return new PublisherAdder<V>() {
 
             @Override
             public RFuture<Boolean> add(Object o) {
-                return instance.addAsync((V) o);
+                return addAsync((V) o);
             }
 
         }.addAll(c);
+    }
+
+    RFuture<Boolean> addAsync(V o) {
+        return instance.addAsync(o);
     }
 
 }

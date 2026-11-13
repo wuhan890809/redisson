@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,8 +43,9 @@ public class StreamObjectMapReplayDecoder extends ObjectMapReplayDecoder<Object,
 
     @Override
     public Map<Object, Object> decode(List<Object> parts, State state) {
-        if (parts.get(0) == null
-                || (parts.get(0) instanceof List && ((List) parts.get(0)).isEmpty())) {
+        if (parts.isEmpty()
+                || parts.get(0) == null
+                    || (parts.get(0) instanceof List && ((List) parts.get(0)).isEmpty())) {
             parts.clear();
             return Collections.emptyMap();
         }
@@ -60,11 +61,11 @@ public class StreamObjectMapReplayDecoder extends ObjectMapReplayDecoder<Object,
     }
 
     @Override
-    public Decoder<Object> getDecoder(Codec codec, int paramNum, State state) {
+    public Decoder<Object> getDecoder(Codec codec, int paramNum, State state, long size) {
         if (this.codec != null) {
             return this.codec;
         }
-        return super.getDecoder(codec, paramNum, state);
+        return super.getDecoder(codec, paramNum, state, size);
     }
 
 }

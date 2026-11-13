@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,6 +55,10 @@ public interface RLiveObjectService {
     
     /**
      * Finds the entities matches specified <code>condition</code>.
+     * <p><strong>
+     * NOTE: open-source version is slow.<br>
+     * Use <a href="https://redisson.pro">Redisson PRO</a> instead.
+     * </strong><p>
      * Usage example:
      * <pre>
      * Collection objects = liveObjectService.find(MyObject.class, Conditions.or(Conditions.in("field", "value1", "value2"), 
@@ -72,6 +76,10 @@ public interface RLiveObjectService {
 
     /**
      * Counts the entities matches specified <code>condition</code>.
+     * <p><strong>
+     * NOTE: open-source version is slow.<br>
+     * Use <a href="https://redisson.pro">Redisson PRO</a> instead.
+     * </strong><p>
      * Usage example:
      * <pre>
      * long objectsAmount = liveObjectService.count(MyObject.class, Conditions.or(Conditions.in("field", "value1", "value2"),
@@ -145,6 +153,24 @@ public interface RLiveObjectService {
     <T> T merge(T detachedObject);
 
     /**
+     * Returns proxied object for the detached object. Transfers all the
+     * <b>NON NULL</b> field values to the redis server. It does not delete any
+     * existing data in redis in case of the field value is null.
+     *
+     * The class representing this object should have a field annotated with
+     * RId, and the object should hold a non null value in that field.
+     *
+     * If this object is not in redis then a new hash key will be created to
+     * store it. Otherwise overrides current object state in Redis with the given object state.
+     *
+     * @param <T> Entity type
+     * @param detachedObjects - not proxied objects
+     * @return proxied object
+     * @throws IllegalArgumentException if the object is is a RLiveObject instance.
+     */
+    <T> List<T> merge(T... detachedObjects);
+
+    /**
      * Returns proxied attached object for the detached object. Transfers all the
      * <b>NON NULL</b> field values to the redis server. Only when the it does
      * not already exist.
@@ -158,6 +184,8 @@ public interface RLiveObjectService {
     /**
      * Returns proxied attached objects for the detached objects. Stores all the
      * <b>NON NULL</b> field values.
+     * <p>
+     * Executed in a batch mode.
      *
      * @param <T> Entity type
      * @param detachedObjects - not proxied objects
@@ -170,7 +198,7 @@ public interface RLiveObjectService {
      *
      * @param <T> Entity type
      * @param attachedObject - proxied object
-     * @return proxied object
+     * @return detachedObject object - not proxied object
      */
     <T> T detach(T attachedObject);
 

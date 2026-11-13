@@ -3,17 +3,22 @@ package org.redisson;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.Serializable;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.PriorityQueue;
-import java.util.Queue;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import mockit.Invocation;
+import mockit.Mock;
+import mockit.MockUp;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.redisson.api.RFuture;
 import org.redisson.api.RPriorityQueue;
+import org.redisson.client.codec.Codec;
+import org.redisson.client.protocol.RedisCommand;
+import org.redisson.command.CommandAsyncService;
+import org.redisson.connection.NodeSource;
 
-public class RedissonPriorityQueueTest extends BaseTest {
+public class RedissonPriorityQueueTest extends RedisDockerTest {
 
     public static class Entry implements Comparable<Entry>, Serializable {
 
@@ -35,11 +40,12 @@ public class RedissonPriorityQueueTest extends BaseTest {
     @Test
     public void testComparable() {
         RPriorityQueue<Entry> queue = redisson.getPriorityQueue("anyQueue");
+        assertThat(queue.poll()).isNull();
+
         queue.add(new Entry("b", 1));
         queue.add(new Entry("c", 1));
         queue.add(new Entry("a", 1));
 
-        // Entry [a:1]
         Entry e = queue.poll();
         assertThat(e.key).isEqualTo("a");
         Entry e1 = queue.poll();
@@ -49,11 +55,13 @@ public class RedissonPriorityQueueTest extends BaseTest {
     @Test
     public void testPollLastAndOfferFirstTo() {
         RPriorityQueue<Integer> queue1 = redisson.getPriorityQueue("deque1");
+        assertThat(queue1.pollLastAndOfferFirstTo("test3")).isNull();
         queue1.add(2);
         queue1.add(1);
         queue1.add(3);
 
         RPriorityQueue<Integer> queue2 = redisson.getPriorityQueue("deque2");
+        assertThat(queue2.pollLastAndOfferFirstTo("test3")).isNull();
         queue2.add(5);
         queue2.add(4);
         queue2.add(6);
@@ -95,7 +103,12 @@ public class RedissonPriorityQueueTest extends BaseTest {
         list.add("5");
         list.add("3");
 
-        list.removeIf(value -> value.equals("2"));
+        for (Iterator<String> iterator = list.iterator(); iterator.hasNext();) {
+            String value = iterator.next();
+            if (value.equals("2")) {
+                iterator.remove();
+            }
+        }
 
         assertThat(list).contains("1", "4", "5", "3");
 
@@ -116,12 +129,12 @@ public class RedissonPriorityQueueTest extends BaseTest {
     public void testIteratorSequence() {
         RPriorityQueue<Integer> set = redisson.getPriorityQueue("set");
         for (int i = 0; i < 1000; i++) {
-            set.add(Integer.valueOf(i));
+            set.add(i);
         }
 
         Queue<Integer> setCopy = new PriorityQueue<Integer>();
         for (int i = 0; i < 1000; i++) {
-            setCopy.add(Integer.valueOf(i));
+            setCopy.add(i);
         }
         
         checkIterator(set, setCopy);
@@ -277,6 +290,35 @@ public class RedissonPriorityQueueTest extends BaseTest {
         set.add(5);
 
         Assertions.assertEquals(7, set.size());
+    }
+
+    @Test
+    public void testWriteMethodReadMaster() {
+        withNewCluster((nodes, redisson) -> {
+            AtomicInteger readReplicaCount = new AtomicInteger();
+            new MockUp<CommandAsyncService>() {
+                @Mock
+                public <V, R> RFuture<R> async(Invocation inv, boolean readOnlyMode, NodeSource source, Codec codec,
+                                               RedisCommand<V> command, Object[] params, boolean ignoreRedirect, boolean noRetry) {
+                    Set<String> listOperations = Set.of("LINDEX", "LLEN");
+                    if (readOnlyMode && listOperations.contains(command.getName())) {
+                        readReplicaCount.incrementAndGet();
+                    }
+                    return inv.proceed(readOnlyMode, source, codec, command, params, ignoreRedirect, noRetry);
+                }
+            };
+
+            RPriorityQueue<Integer> set = redisson.getPriorityQueue("set");
+            set.add(1);
+            set.add(2);
+            set.add(3);
+            set.add(3);
+            set.add(4);
+            set.add(5);
+            set.add(5);
+
+            assertThat(readReplicaCount.get()).isEqualTo(0);
+        });
     }
 
 

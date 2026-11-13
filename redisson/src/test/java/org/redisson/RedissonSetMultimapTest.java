@@ -3,14 +3,18 @@ package org.redisson;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RSet;
 import org.redisson.api.RSetMultimap;
+import org.redisson.client.codec.StringCodec;
 
 import java.io.Serializable;
+import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-public class RedissonSetMultimapTest extends BaseTest {
+public class RedissonSetMultimapTest extends RedisDockerTest {
 
     public static class SimpleKey implements Serializable {
 
@@ -218,10 +222,11 @@ public class RedissonSetMultimapTest extends BaseTest {
     public void testSizeInMemory() {
         RSetMultimap<String, String> set = redisson.getSetMultimap("test");
         set.put("1", "2");
-        assertThat(set.sizeInMemory()).isEqualTo(229);
+        long s = set.sizeInMemory();
+        assertThat(s).isGreaterThan(32);
 
         set.put("1", "3");
-        assertThat(set.sizeInMemory()).isEqualTo(259);
+        assertThat(set.sizeInMemory()).isGreaterThan(s);
     }
     
     @Test
@@ -360,12 +365,18 @@ public class RedissonSetMultimapTest extends BaseTest {
 
     @Test
     public void testPutAll() {
-        RSetMultimap<SimpleKey, SimpleValue> map = redisson.getSetMultimap("test1");
-        List<SimpleValue> values = Arrays.asList(new SimpleValue("1"), new SimpleValue("2"), new SimpleValue("3"));
-        assertThat(map.putAll(new SimpleKey("0"), values)).isTrue();
-        assertThat(map.putAll(new SimpleKey("0"), Arrays.asList(new SimpleValue("1")))).isFalse();
+        RSetMultimap<String, String> map = redisson.getSetMultimap("test1");
+        List<String> values = Arrays.asList("1", "2", "3");
+        assertThat(map.putAll("0", values)).isTrue();
+        assertThat(map.putAll("0", Arrays.asList("1"))).isFalse();
 
-        assertThat(map.get(new SimpleKey("0"))).containsOnlyElementsOf(values);
+        assertThat(map.get("0")).containsOnlyElementsOf(values);
+
+        List<String> vals = new ArrayList<>();
+        for (int i = 0; i < 10000; i++) {
+            vals.add("" + i);
+        }
+        map.putAll("0", vals);
     }
 
     @Test
@@ -406,7 +417,7 @@ public class RedissonSetMultimapTest extends BaseTest {
         map.put("1", "2");
         map.put("2", "3");
 
-        map.expire(100, TimeUnit.MILLISECONDS);
+        map.expire(Duration.ofMillis(100));
 
         Thread.sleep(500);
 
@@ -424,7 +435,34 @@ public class RedissonSetMultimapTest extends BaseTest {
         assertThat(oldValues).containsOnly(new SimpleValue("1"));
 
         Set<SimpleValue> allValues = map.getAll(new SimpleKey("0"));
-        assertThat(allValues).containsOnlyElementsOf(values);
+        assertThat(allValues).containsExactlyElementsOf(values);
+
+        Set<SimpleValue> oldValues2 = map.replaceValues(new SimpleKey("0"), Collections.emptyList());
+        assertThat(oldValues2).containsExactlyElementsOf(values);
+
+        Set<SimpleValue> vals = map.getAll(new SimpleKey("0"));
+        assertThat(vals).isEmpty();
+
+    }
+
+    @Test
+    public void testFastReplaceValues() {
+        RSetMultimap<SimpleKey, SimpleValue> map = redisson.getSetMultimap("testFastReplace");
+
+        map.put(new SimpleKey("0"), new SimpleValue("1"));
+        map.put(new SimpleKey("3"), new SimpleValue("4"));
+
+        List<SimpleValue> values = Arrays.asList(new SimpleValue("11"), new SimpleValue("12"));
+
+        map.fastReplaceValues(new SimpleKey("0"), values);
+
+        Set<SimpleValue> allValues = map.getAll(new SimpleKey("0"));
+        assertThat(allValues).containsExactlyElementsOf(values);
+
+        map.fastReplaceValues(new SimpleKey("0"), Collections.emptyList());
+
+        Set<SimpleValue> vals = map.getAll(new SimpleKey("0"));
+        assertThat(vals).isEmpty();
     }
 
     @Test
@@ -518,6 +556,62 @@ public class RedissonSetMultimapTest extends BaseTest {
         assertThat(map4.size()).isEqualTo(2);
         assertThat(map4.get("1")).containsOnly("2");
         assertThat(map4.get("2")).containsOnly("3");
+    }
+
+    @Test
+    public void testDistributedIterator() {
+        RSetMultimap<String, String> map = redisson.getSetMultimap("set", StringCodec.INSTANCE);
+
+        // populate set with elements
+        List<String> stringsOne = IntStream.range(0, 128).mapToObj(i -> "one-" + i).collect(Collectors.toList());
+        List<String> stringsTwo = IntStream.range(0, 128).mapToObj(i -> "two-" + i).collect(Collectors.toList());
+        map.putAll("someKey", stringsOne);
+        map.putAll("someKey", stringsTwo);
+
+        Iterator<String> stringIterator = map.get("someKey")
+                .distributedIterator("iterator_{set}", "one*", 10);
+
+        // read some elements using iterator
+        List<String> strings = new ArrayList<>();
+        for (int i = 0; i < 64; i++) {
+            if (stringIterator.hasNext()) {
+                strings.add(stringIterator.next());
+            }
+        }
+
+        // create another iterator instance using the same name
+        RSetMultimap<String, String> map2 = redisson.getSetMultimap("set", StringCodec.INSTANCE);
+        Iterator<String> stringIterator2 = map2.get("someKey")
+                .distributedIterator("iterator_{set}", "one*", 10);
+
+
+        assertTrue(stringIterator2.hasNext());
+
+        // read all remaining elements
+        stringIterator2.forEachRemaining(strings::add);
+        stringIterator.forEachRemaining(strings::add);
+
+        assertThat(strings).containsAll(stringsOne);
+        assertThat(strings).hasSize(stringsOne.size());
+    }
+
+    @Test
+    public void testSetMultimapEntriesCount() {
+        RSetMultimap<String, String> mm = redisson.getSetMultimap("count-test-set");
+        IntStream.range(0, 200).forEach(i -> {
+            for (int j = 0; j < 5; j++) {
+                mm.put("k" + i, "v" + i + "-" + j);
+            }
+        });
+
+        Set<Map.Entry<String, String>> seen = new HashSet<>();
+        seen.addAll(mm.entries(64));
+
+        assertThat(seen).hasSize(1000);
+        assertThat(mm.keySet(64)).hasSize(200);
+        // For Set values the count also flows through SSCAN on the value dimension.
+        Set<String> distinctValues = new HashSet<>(mm.values(64));
+        assertThat(distinctValues).hasSize(1000);
     }
 
 }

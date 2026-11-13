@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,19 +15,21 @@
  */
 package org.redisson;
 
-import java.util.*;
-
 import org.redisson.api.RDeque;
 import org.redisson.api.RFuture;
+import org.redisson.api.ObjectListener;
 import org.redisson.api.RedissonClient;
+import org.redisson.api.listener.DequeAddFirstListener;
+import org.redisson.api.listener.DequeAddLastListener;
 import org.redisson.api.queue.DequeMoveArgs;
 import org.redisson.api.queue.DequeMoveParams;
-import org.redisson.api.queue.DequeMoveSource;
 import org.redisson.client.codec.Codec;
 import org.redisson.client.protocol.RedisCommand;
 import org.redisson.client.protocol.RedisCommands;
 import org.redisson.client.protocol.decoder.ListFirstObjectDecoder;
 import org.redisson.command.CommandAsyncExecutor;
+
+import java.util.*;
 
 /**
  * Distributed and concurrent implementation of {@link java.util.Queue}
@@ -50,6 +52,41 @@ public class RedissonDeque<V> extends RedissonQueue<V> implements RDeque<V> {
     }
 
     @Override
+    public int addListener(ObjectListener listener) {
+        if (listener instanceof DequeAddFirstListener) {
+            return addListener("__keyevent@*:lpush", (DequeAddFirstListener) listener, DequeAddFirstListener::onAddFirst);
+        }
+        if (listener instanceof DequeAddLastListener) {
+            return addListener("__keyevent@*:rpush", (DequeAddLastListener) listener, DequeAddLastListener::onAddLast);
+        }
+
+        return super.addListener(listener);
+    }
+
+    @Override
+    public RFuture<Integer> addListenerAsync(ObjectListener listener) {
+        if (listener instanceof DequeAddFirstListener) {
+            return addListenerAsync("__keyevent@*:lpush", (DequeAddFirstListener) listener, DequeAddFirstListener::onAddFirst);
+        }
+        if (listener instanceof DequeAddLastListener) {
+            return addListenerAsync("__keyevent@*:rpush", (DequeAddLastListener) listener, DequeAddLastListener::onAddLast);
+        }
+
+        return super.addListenerAsync(listener);
+    }
+
+    @Override
+    public void removeListener(int listenerId) {
+        removeListener(listenerId, "__keyevent@*:lpush", "__keyevent@*:rpush");
+        super.removeListener(listenerId);
+    }
+
+    @Override
+    public RFuture<Void> removeListenerAsync(int listenerId) {
+        return removeListenerAsync(super.removeListenerAsync(listenerId), listenerId, "__keyevent@*:lpush", "__keyevent@*:rpush");
+    }
+
+    @Override
     public int addFirstIfExists(V... elements) {
         return get(addFirstIfExistsAsync(elements));
     }
@@ -57,6 +94,32 @@ public class RedissonDeque<V> extends RedissonQueue<V> implements RDeque<V> {
     @Override
     public int addLastIfExists(V... elements) {
         return get(addLastIfExistsAsync(elements));
+    }
+
+    @Override
+    public int addFirst(V... elements) {
+        return get(addFirstAsync(elements));
+    }
+
+    @Override
+    public int addLast(V... elements) {
+        return get(addLastAsync(elements));
+    }
+
+    @Override
+    public RFuture<Integer> addFirstAsync(V... elements) {
+        List<Object> args = new ArrayList<>(elements.length + 1);
+        args.add(getRawName());
+        encode(args, Arrays.asList(elements));
+        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.LPUSH, args.toArray());
+    }
+
+    @Override
+    public RFuture<Integer> addLastAsync(V... elements) {
+        List<Object> args = new ArrayList<>(elements.length + 1);
+        args.add(getRawName());
+        encode(args, Arrays.asList(elements));
+        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.RPUSH, args.toArray());
     }
 
     @Override
@@ -102,8 +165,7 @@ public class RedissonDeque<V> extends RedissonQueue<V> implements RDeque<V> {
 
     @Override
     public RFuture<V> moveAsync(DequeMoveArgs args) {
-        DequeMoveSource source = (DequeMoveSource) args;
-        DequeMoveParams pp = source.getParams();
+        DequeMoveParams pp = (DequeMoveParams) args;
         return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.LMOVE, getRawName(),
                                                 pp.getDestName(), pp.getSourceDirection(), pp.getDestDirection());
     }
@@ -230,7 +292,7 @@ public class RedissonDeque<V> extends RedissonQueue<V> implements RDeque<V> {
 
     @Override
     public RFuture<List<V>> pollLastAsync(int limit) {
-        return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_LIST,
+        return commandExecutor.evalWriteNoRetryAsync(getRawName(), codec, RedisCommands.EVAL_LIST,
                    "local result = {};"
                  + "for i = 1, ARGV[1], 1 do " +
                        "local value = redis.call('rpop', KEYS[1]);" +

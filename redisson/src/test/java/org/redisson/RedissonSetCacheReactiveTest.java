@@ -3,17 +3,18 @@ package org.redisson;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.Serializable;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Set;
+import java.time.Duration;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.redisson.api.RSetCacheReactive;
+import org.redisson.api.*;
+import org.redisson.client.codec.StringCodec;
+import org.redisson.config.Config;
+import reactor.core.publisher.Mono;
 
 public class RedissonSetCacheReactiveTest extends BaseReactiveTest {
 
@@ -29,6 +30,33 @@ public class RedissonSetCacheReactiveTest extends BaseReactiveTest {
             this.lng = lng;
         }
 
+    }
+
+    @Test
+    public void testBatchScriptCache() throws InterruptedException {
+        Config config = new Config();
+        config.setUseScriptCache(true);
+        config.useSingleServer()
+                .setAddress(redisson.getConfig().useSingleServer().getAddress());
+        RedissonReactiveClient client = Redisson.create(config).reactive();
+
+        RBatchReactive batch = client.createBatch();
+        Mono<Boolean> setResult = batch.getSetCache("test2",
+                        StringCodec.INSTANCE)
+                .add("setValue", 10, TimeUnit.SECONDS);
+
+        Thread.sleep(400);
+
+        Mono<Integer> monoMsSetSize = batch.getSetCache("test2",
+                StringCodec.INSTANCE).size();
+        batch.execute().subscribe();
+        Integer v = Mono.zip(setResult, monoMsSetSize).flatMap(touple -> {
+            return Mono.just(touple.getT2());
+        }).block();
+
+        assertThat(v).isEqualTo(1);
+
+        client.shutdown();
     }
 
     @Test
@@ -106,7 +134,7 @@ public class RedissonSetCacheReactiveTest extends BaseReactiveTest {
     public void testIteratorSequence() throws InterruptedException {
         RSetCacheReactive<Long> set = redisson.getSetCache("set");
         for (int i = 0; i < 1000; i++) {
-            sync(set.add(Long.valueOf(i)));
+            sync(set.add((long) i));
         }
 
         Thread.sleep(1000);
@@ -114,7 +142,7 @@ public class RedissonSetCacheReactiveTest extends BaseReactiveTest {
         
         Set<Long> setCopy = new HashSet<Long>();
         for (int i = 0; i < 1000; i++) {
-            setCopy.add(Long.valueOf(i));
+            setCopy.add((long) i);
         }
 
         checkIterator(set, setCopy);
@@ -288,6 +316,25 @@ public class RedissonSetCacheReactiveTest extends BaseReactiveTest {
 
         Assertions.assertEquals(0, sync(cache.size()).intValue());
 
+    }
+
+    @Test
+    public void testAddIfAbsentWithMapParam() throws InterruptedException {
+        sync(redisson.getKeys().flushall());
+        RSetCacheReactive<String> cache = redisson.getSetCache("cache");
+        Map<String, Duration> map = new HashMap<>();
+        map.put("key1", Duration.ofMinutes(1));
+        map.put("key2", Duration.ofMinutes(1));
+        assertThat(sync(cache.addIfAbsent(map))).isTrue();
+        map = new HashMap<>();
+        map.put("key1", Duration.ofMinutes(1));
+        assertThat(sync(cache.addIfAbsent(map))).isFalse();
+        map = new HashMap<>();
+        map.put("key3", Duration.ofSeconds(1));
+        assertThat(sync(cache.addIfAbsent(map))).isTrue();
+        Thread.sleep(1200);
+        assertThat(sync(cache.addIfAbsent(map))).isTrue();
+        sync((redisson.getKeys().flushall()));
     }
 
 }

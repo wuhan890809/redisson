@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ package org.redisson.api.listener;
 import java.util.EventListener;
 
 /**
- * Listener for Redis messages published via RTopic Redisson object
+ * Listener for Valkey or Redis messages published via RTopic Redisson object
  *
  * @author Nikita Koksharov
  *
@@ -26,6 +26,7 @@ import java.util.EventListener;
  *
  * @see org.redisson.api.RTopic
  */
+@FunctionalInterface
 public interface PatternMessageListener<M> extends EventListener {
 
     /**

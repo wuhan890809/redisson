@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,27 +15,30 @@
  */
 package org.redisson.command;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
-
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelPromise;
+import io.netty.util.Timeout;
 import org.redisson.api.BatchOptions;
 import org.redisson.api.BatchOptions.ExecutionMode;
-import org.redisson.api.RFuture;
 import org.redisson.client.RedisConnection;
 import org.redisson.client.codec.StringCodec;
 import org.redisson.client.protocol.CommandData;
 import org.redisson.client.protocol.CommandsData;
 import org.redisson.client.protocol.RedisCommands;
 import org.redisson.command.CommandBatchService.Entry;
+import org.redisson.config.DelayStrategy;
 import org.redisson.connection.ConnectionManager;
 import org.redisson.connection.NodeSource;
 import org.redisson.connection.NodeSource.Redirect;
 import org.redisson.liveobject.core.RedissonObjectBuilder;
-import org.redisson.misc.RPromise;
-import org.redisson.misc.RedissonPromise;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 
@@ -50,26 +53,43 @@ public class RedisCommonBatchExecutor extends RedisExecutor<Object, Void> {
     private final AtomicInteger slots;
     private final BatchOptions options;
     
-    public RedisCommonBatchExecutor(NodeSource source, RPromise<Void> mainPromise,
-                                    ConnectionManager connectionManager, BatchOptions options, Entry entry, AtomicInteger slots, RedissonObjectBuilder.ReferenceType referenceType) {
+    public RedisCommonBatchExecutor(NodeSource source, CompletableFuture<Void> mainPromise,
+                                    ConnectionManager connectionManager, BatchOptions options, Entry entry,
+                                    AtomicInteger slots, RedissonObjectBuilder.ReferenceType referenceType, boolean noRetry) {
         super(entry.isReadOnlyMode(), source, null, null, null,
-                mainPromise, false, connectionManager, null, referenceType);
+                mainPromise, false, connectionManager, null, referenceType, noRetry,
+                retryAttempts(connectionManager, options),
+                retryInterval(connectionManager, options),
+                timeout(connectionManager, options),
+                false, null);
         this.options = options;
         this.entry = entry;
         this.slots = slots;
-        
-        if (options.getRetryAttempts() > 0) {
-            this.attempts = options.getRetryAttempts();
-        }
-        if (options.getRetryInterval() > 0) {
-            this.retryInterval  = options.getRetryInterval();
-        }
+    }
+
+    private static int timeout(ConnectionManager connectionManager, BatchOptions options) {
+        int result = connectionManager.getServiceManager().getConfig().getTimeout();
         if (options.getResponseTimeout() > 0) {
-            this.responseTimeout = options.getResponseTimeout();
+            result = (int) options.getResponseTimeout();
         }
         if (options.getSyncSlaves() > 0) {
-            this.responseTimeout += options.getSyncTimeout();
+            result += (int) options.getSyncTimeout();
         }
+        return result;
+    }
+
+    private static DelayStrategy retryInterval(ConnectionManager connectionManager, BatchOptions options) {
+        if (options.getRetryDelay() != null) {
+            return options.getRetryDelay();
+        }
+        return connectionManager.getServiceManager().getConfig().getRetryDelay();
+    }
+
+    private static int retryAttempts(ConnectionManager connectionManager, BatchOptions options) {
+        if (options.getRetryAttempts() >= 0) {
+            return options.getRetryAttempts();
+        }
+        return connectionManager.getServiceManager().getConfig().getRetryAttempts();
     }
 
     @Override
@@ -87,20 +107,33 @@ public class RedisCommonBatchExecutor extends RedisExecutor<Object, Void> {
             free(command.getParams());
         }
     }
-    
+
     @Override
-    protected void sendCommand(RPromise<Void> attemptPromise, RedisConnection connection) {
+    protected CompletableFuture<RedisConnection> getConnection(CompletableFuture<Void> attemptPromise) {
+        CompletableFuture<RedisConnection> f = super.getConnection(attemptPromise);
+        f.whenComplete((r, e) -> {
+            if (e != null) {
+                if (source.getEntry().getReplacedBy() != null) {
+                    source = new NodeSource(source.getEntry().getReplacedBy());
+                }
+            }
+        });
+        return f;
+    }
+
+    @Override
+    protected void sendCommand(CompletableFuture<Void> attemptPromise, RedisConnection connection) {
         boolean isAtomic = options.getExecutionMode() != ExecutionMode.IN_MEMORY;
         boolean isQueued = options.getExecutionMode() == ExecutionMode.REDIS_READ_ATOMIC 
                                 || options.getExecutionMode() == ExecutionMode.REDIS_WRITE_ATOMIC;
 
         List<CommandData<?, ?>> list = new ArrayList<>(entry.getCommands().size());
         if (source.getRedirect() == Redirect.ASK) {
-            RPromise<Void> promise = new RedissonPromise<Void>();
-            list.add(new CommandData<Void, Void>(promise, StringCodec.INSTANCE, RedisCommands.ASKING, new Object[] {}));
+            CompletableFuture<Void> promise = new CompletableFuture<Void>();
+            list.add(new CommandData<>(promise, StringCodec.INSTANCE, RedisCommands.ASKING, new Object[] {}));
         } 
         for (CommandData<?, ?> c : entry.getCommands()) {
-            if ((c.getPromise().isCancelled() || c.getPromise().isSuccess()) 
+            if ((c.getPromise().isCancelled() || (c.getPromise().isDone() && !c.getPromise().isCompletedExceptionally()))
                     && !isWaitCommand(c) 
                         && !isAtomic) {
                 // skip command
@@ -111,26 +144,57 @@ public class RedisCommonBatchExecutor extends RedisExecutor<Object, Void> {
         
         if (list.isEmpty()) {
             writeFuture = connection.getChannel().newPromise();
-            attemptPromise.trySuccess(null);
-            timeout.cancel();
+            attemptPromise.complete(null);
+            timeout.ifPresent(Timeout::cancel);
             return;
         }
-        
+
+        sendCommand(connection, attemptPromise, list);
+    }
+
+    private void sendCommand(RedisConnection connection, CompletableFuture<Void> attemptPromise, List<CommandData<?, ?>> list) {
+        boolean isAtomic = options.getExecutionMode() != ExecutionMode.IN_MEMORY;
+        boolean isQueued = options.getExecutionMode() == ExecutionMode.REDIS_READ_ATOMIC
+                || options.getExecutionMode() == ExecutionMode.REDIS_WRITE_ATOMIC;
+
+        CommandData<?, ?> lastCommand = connection.getLastCommand();
+        if (lastCommand != null && options.isSkipResult()) {
+            writeFuture = connection.getChannel().newPromise();
+            lastCommand.getPromise().whenComplete((r, e) -> {
+                CommandData<?, ?> currentLastCommand = connection.getLastCommand();
+                if (lastCommand != currentLastCommand && currentLastCommand != null) {
+                    sendCommand(connection, attemptPromise, list);
+                    return;
+                }
+
+                ChannelFuture wf = connection.send(new CommandsData(attemptPromise, list, options.isSkipResult(), isAtomic, isQueued, options.getSyncSlaves() > 0));
+                wf.addListener((ChannelFutureListener) future -> {
+                    if (future.isSuccess()) {
+                        ((ChannelPromise) writeFuture).trySuccess(future.getNow());
+                    } else {
+                        ((ChannelPromise) writeFuture).tryFailure(future.cause());
+                    }
+                });
+            });
+            return;
+        }
+
         writeFuture = connection.send(new CommandsData(attemptPromise, list, options.isSkipResult(), isAtomic, isQueued, options.getSyncSlaves() > 0));
     }
 
     protected boolean isWaitCommand(CommandData<?, ?> c) {
-        return c.getCommand().getName().equals(RedisCommands.WAIT.getName());
+        return c.getCommand().getName().equals(RedisCommands.WAIT.getName())
+                || c.getCommand().getName().equals(RedisCommands.WAITAOF.getName());
     }
 
     @Override
-    protected void handleResult(RPromise<Void> attemptPromise, RFuture<RedisConnection> connectionFuture) throws ReflectiveOperationException {
-        if (attemptPromise.isSuccess()) {
+    protected void handleResult(CompletableFuture<Void> attemptPromise, CompletableFuture<RedisConnection> connectionFuture) throws ReflectiveOperationException {
+        if (attemptPromise.isDone() && !attemptPromise.isCompletedExceptionally()) {
             if (slots.decrementAndGet() == 0) {
-                mainPromise.trySuccess(null);
+                handleSuccess(mainPromise, connectionFuture, null);
             }
         } else {
-            mainPromise.tryFailure(attemptPromise.cause());
+            handleError(connectionFuture, cause(attemptPromise));
         }
     }
     

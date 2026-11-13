@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,10 @@ import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.Codec;
 import org.redisson.client.protocol.RedisCommands;
 import org.redisson.command.CommandAsyncExecutor;
+import org.redisson.api.queue.QueueMoveElementsArgs;
+import org.redisson.api.queue.QueueMoveElementsParams;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
@@ -33,7 +36,7 @@ import java.util.NoSuchElementException;
  *
  * @param <V> the type of elements held in this collection
  */
-public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
+public class RedissonQueue<V> extends BaseRedissonList<V> implements RQueue<V> {
 
     public RedissonQueue(CommandAsyncExecutor commandExecutor, String name, RedissonClient redisson) {
         super(commandExecutor, name, redisson);
@@ -86,7 +89,7 @@ public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
 
     @Override
     public RFuture<List<V>> pollAsync(int limit) {
-        return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_LIST,
+        return commandExecutor.evalWriteNoRetryAsync(getRawName(), codec, RedisCommands.EVAL_LIST,
                    "local result = {};"
                  + "for i = 1, ARGV[1], 1 do " +
                        "local value = redis.call('lpop', KEYS[1]);" +
@@ -128,6 +131,27 @@ public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
     @Override
     public RFuture<V> pollLastAndOfferFirstToAsync(String queueName) {
         return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.RPOPLPUSH, getRawName(), queueName);
+    }
+
+    @Override
+    public List<V> move(QueueMoveElementsArgs args) {
+        return get(moveAsync(args));
+    }
+
+    @Override
+    public RFuture<List<V>> moveAsync(QueueMoveElementsArgs args) {
+        QueueMoveElementsParams pp = (QueueMoveElementsParams) args;
+        List<Object> params = new ArrayList<>();
+        params.add(getRawName());
+        params.add(mapName(pp.getDestName()));
+        params.add("LEFT");
+        params.add("RIGHT");
+        if (pp.getSelector() != null) {
+            params.add(pp.getSelector());
+            params.add(pp.getCount());
+            params.add(pp.getOrdering());
+        }
+        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.LMOVEM, params.toArray());
     }
 
 }

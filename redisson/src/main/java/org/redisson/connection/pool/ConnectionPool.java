@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,30 +16,27 @@
 package org.redisson.connection.pool;
 
 import org.redisson.api.NodeType;
-import org.redisson.api.RFuture;
+import org.redisson.client.FailedNodeDetector;
 import org.redisson.client.RedisConnection;
 import org.redisson.client.RedisConnectionException;
 import org.redisson.client.protocol.RedisCommand;
-import org.redisson.client.protocol.RedisCommands;
 import org.redisson.config.MasterSlaveServersConfig;
+import org.redisson.config.ReadMode;
 import org.redisson.connection.ClientConnectionsEntry;
-import org.redisson.connection.ClientConnectionsEntry.FreezeReason;
 import org.redisson.connection.ConnectionManager;
+import org.redisson.connection.ConnectionsHolder;
 import org.redisson.connection.MasterSlaveEntry;
-import org.redisson.misc.RPromise;
-import org.redisson.misc.RedissonPromise;
+import org.redisson.misc.Tuple;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
-import java.util.Iterator;
-import java.util.LinkedList;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Base connection pool class 
@@ -51,8 +48,6 @@ import java.util.function.BiConsumer;
 abstract class ConnectionPool<T extends RedisConnection> {
 
     private final Logger log = LoggerFactory.getLogger(getClass());
-
-    protected final Queue<ClientConnectionsEntry> entries = new ConcurrentLinkedQueue<>();
 
     final ConnectionManager connectionManager;
 
@@ -66,370 +61,187 @@ abstract class ConnectionPool<T extends RedisConnection> {
         this.connectionManager = connectionManager;
     }
 
-    public RFuture<Void> add(ClientConnectionsEntry entry) {
-        RPromise<Void> promise = new RedissonPromise<Void>();
-        promise.onComplete((r, e) -> {
-            if (e == null) {
-                entries.add(entry);
+    protected abstract ConnectionsHolder<T> getConnectionHolder(ClientConnectionsEntry entry, boolean trackChanges);
+
+    public Tuple<CompletableFuture<T>, Throwable> getTuple(RedisCommand<?> command, boolean trackChanges) {
+        return getTuple(command, trackChanges, null);
+    }
+
+    protected Tuple<CompletableFuture<T>, Throwable> getTuple(RedisCommand<?> command, boolean trackChanges, ReadMode readMode) {
+        Collection<ClientConnectionsEntry> entries = masterSlaveEntry.getAllEntries();
+        List<ClientConnectionsEntry> entriesCopy = new ArrayList<>(entries);
+        entriesCopy.removeIf(entry -> {
+            if (entry.isFreezed()) {
+                return true;
             }
+            if (isHealthy(entry)) {
+                return false;
+            }
+
+            FailedNodeDetector detector = entry.getClient().getConfig().getFailedNodeDetector();
+            RedisConnectionException cause = new RedisConnectionException(
+                    "Redis node has been marked as failed according to the detection logic defined in " + detector);
+            shutdownAndReconnect(entry, detector, cause);
+            return true;
         });
-        initConnections(entry, promise, true);
-        return promise;
-    }
-
-    public RPromise<Void> initConnections(ClientConnectionsEntry entry) {
-        RPromise<Void> promise = new RedissonPromise<Void>();
-        initConnections(entry, promise, false);
-        return promise;
-    }
-    
-    private void initConnections(ClientConnectionsEntry entry, RPromise<Void> initPromise, boolean checkFreezed) {
-        int minimumIdleSize = getMinimumIdleSize(entry);
-
-        if (minimumIdleSize == 0 || (checkFreezed && entry.isFreezed())) {
-            initPromise.trySuccess(null);
-            return;
-        }
-
-        AtomicInteger initializedConnections = new AtomicInteger(minimumIdleSize);
-        int startAmount = Math.min(10, minimumIdleSize);
-        AtomicInteger requests = new AtomicInteger(startAmount);
-        for (int i = 0; i < startAmount; i++) {
-            createConnection(checkFreezed, requests, entry, initPromise, minimumIdleSize, initializedConnections);
-        }
-    }
-
-    private void createConnection(boolean checkFreezed, AtomicInteger requests, ClientConnectionsEntry entry, RPromise<Void> initPromise,
-            int minimumIdleSize, AtomicInteger initializedConnections) {
-
-        if ((checkFreezed && entry.isFreezed()) || !tryAcquireConnection(entry)) {
-            int totalInitializedConnections = minimumIdleSize - initializedConnections.get();
-            Throwable cause = new RedisConnectionException(
-                    "Unable to init enough connections amount! Only " + totalInitializedConnections + " of " + minimumIdleSize + " were initialized. Server: "
-                                        + entry.getClient().getAddr());
-            initPromise.tryFailure(cause);
-            return;
+        if (readMode != null && readMode.isAvailabilityZoneAware()) {
+            ClientConnectionsEntry entry = selectInAvailabilityZoneOrder(command, readMode, entriesCopy);
+            if (entry != null) {
+                return new Tuple<>(acquireConnection(command, entry, trackChanges), null);
+            }
+        } else if (!entriesCopy.isEmpty()) {
+            ClientConnectionsEntry entry = config.getLoadBalancer().getEntry(entriesCopy, command);
+            if (entry != null) {
+                log.debug("Entry {} selected as connection source", entry);
+                return new Tuple<>(acquireConnection(command, entry, trackChanges), null);
+            }
         }
         
-        acquireConnection(entry, new Runnable() {
-            
-            @Override
-            public void run() {
-                RPromise<T> promise = new RedissonPromise<T>();
-                createConnection(entry, promise);
-                promise.onComplete((conn, e) -> {
-                        if (e == null) {
-                            if (!initPromise.isDone()) {
-                                releaseConnection(entry, conn);
-                            } else {
-                                conn.closeAsync();
-                            }
-                        }
-
-                        releaseConnection(entry);
-
-                        if (e != null) {
-                            if (initPromise.isDone()) {
-                                return;
-                            }
-                            
-                            for (RedisConnection connection : entry.getAllConnections()) {
-                                if (!connection.isClosed()) {
-                                    connection.closeAsync();
-                                }
-                            }
-                            entry.getAllConnections().clear();
-                            
-                            for (RedisConnection connection : entry.getAllSubscribeConnections()) {
-                                if (!connection.isClosed()) {
-                                    connection.closeAsync();
-                                }
-                            }
-                            entry.getAllSubscribeConnections().clear();
-                            
-                            int totalInitializedConnections = minimumIdleSize - initializedConnections.get();
-                            String errorMsg;
-                            if (totalInitializedConnections == 0) {
-                                errorMsg = "Unable to connect to Redis server: " + entry.getClient().getAddr();
-                            } else {
-                                errorMsg = "Unable to init enough connections amount! Only " + totalInitializedConnections 
-                                        + " of " + minimumIdleSize + " were initialized. Redis server: " + entry.getClient().getAddr();
-                            }
-                            Throwable cause = new RedisConnectionException(errorMsg, e);
-                            initPromise.tryFailure(cause);
-                            return;
-                        }
-
-                        int value = initializedConnections.decrementAndGet();
-                        if (value == 0) {
-                            if (initPromise.trySuccess(null)) {
-                                log.info("{} connections initialized for {}", minimumIdleSize, entry.getClient().getAddr());
-                            }
-                        } else if (value > 0 && !initPromise.isDone()) {
-                            if (requests.incrementAndGet() <= minimumIdleSize) {
-                                createConnection(checkFreezed, requests, entry, initPromise, minimumIdleSize, initializedConnections);
-                            }
-                        }
-                });
-            }
-        });
-
-    }
-
-    protected void acquireConnection(ClientConnectionsEntry entry, Runnable runnable) {
-        entry.acquireConnection(runnable);
-    }
-
-    protected abstract int getMinimumIdleSize(ClientConnectionsEntry entry);
-
-    public RFuture<T> get(RedisCommand<?> command) {
-        List<ClientConnectionsEntry> entriesCopy = new LinkedList<ClientConnectionsEntry>(entries);
-        for (Iterator<ClientConnectionsEntry> iterator = entriesCopy.iterator(); iterator.hasNext();) {
-            ClientConnectionsEntry entry = iterator.next();
-            if (!((!entry.isFreezed() || entry.isMasterForRead()) 
-                    && tryAcquireConnection(entry))) {
-                iterator.remove();
-            }
-        }
-        if (!entriesCopy.isEmpty()) {
-            ClientConnectionsEntry entry = config.getLoadBalancer().getEntry(entriesCopy);
-            return acquireConnection(command, entry);
-        }
-        
-        List<InetSocketAddress> failed = new LinkedList<>();
-        List<InetSocketAddress> freezed = new LinkedList<>();
+        List<InetSocketAddress> failed = new ArrayList<>();
+        List<InetSocketAddress> freezed = new ArrayList<>();
         for (ClientConnectionsEntry entry : entries) {
-            if (entry.isFailed()) {
+            if (entry.getClient().getConfig().getFailedNodeDetector().isNodeFailed(entry.getClient().getAddr())) {
                 failed.add(entry.getClient().getAddr());
             } else if (entry.isFreezed()) {
                 freezed.add(entry.getClient().getAddr());
             }
         }
 
-        StringBuilder errorMsg = new StringBuilder(getClass().getSimpleName() + " no available Redis entries. Master entry host: " + masterSlaveEntry.getClient().getAddr());
+        StringBuilder errorMsg = new StringBuilder(getClass().getSimpleName() + " no available Redis entries. " +
+                "Master entry host: " + masterSlaveEntry.getClient().getAddr() + " entries " + entries);
         if (!freezed.isEmpty()) {
             errorMsg.append(" Disconnected hosts: ").append(freezed);
         }
         if (!failed.isEmpty()) {
-            errorMsg.append(" Hosts disconnected due to errors during `failedSlaveCheckInterval`: ").append(failed);
+            errorMsg.append(" Hosts disconnected by 'failedNodeDetector:' ").append(failed);
         }
 
         RedisConnectionException exception = new RedisConnectionException(errorMsg.toString());
-        return RedissonPromise.newFailedFuture(exception);
+        return new Tuple<>(null, exception);
     }
 
-    public RFuture<T> get(RedisCommand<?> command, ClientConnectionsEntry entry) {
-            return acquireConnection(command, entry);
+    private ClientConnectionsEntry selectInAvailabilityZoneOrder(RedisCommand<?> command, ReadMode readMode,
+                                                                 List<ClientConnectionsEntry> entriesCopy) {
+        String zone = config.getClientAvailabilityZone();
+        Map<Integer, List<ClientConnectionsEntry>> byStep = new TreeMap<>();
+        for (ClientConnectionsEntry entry : entriesCopy) {
+            int step = availabilityZoneStep(readMode, entry.getNodeType() == NodeType.SLAVE,
+                    zone != null && zone.equals(entry.getAvailabilityZone()));
+            byStep.computeIfAbsent(step, k -> new ArrayList<>()).add(entry);
         }
 
-    public abstract static class AcquireCallback<T> implements Runnable, BiConsumer<T, Throwable> {
-        
+        for (Map.Entry<Integer, List<ClientConnectionsEntry>> step : byStep.entrySet()) {
+            ClientConnectionsEntry entry = config.getLoadBalancer().getEntry(step.getValue(), command);
+            if (entry != null) {
+                log.debug("Entry {} selected as connection source, availability zone step {}", entry, step.getKey());
+                return entry;
+            }
+        }
+        return null;
     }
-    
-    protected final RFuture<T> acquireConnection(RedisCommand<?> command, ClientConnectionsEntry entry) {
-        RPromise<T> result = new RedissonPromise<T>();
 
-            AcquireCallback<T> callback = new AcquireCallback<T>() {
-                boolean executed;
-                
-                @Override
-                public void run() {
-                    executed = true;
-                    connectTo(entry, result);
-                }
-                
-                @Override
-                public void accept(T t, Throwable u) {
-                    if (executed) {
-                        return;
-                    }
-                    entry.removeConnection(this);
-                }
-            };
-            
-            result.onComplete(callback);
-            acquireConnection(entry, callback);
-        
+    public CompletableFuture<T> get(RedisCommand<?> command, boolean trackChanges) {
+        return get(command, trackChanges, null);
+    }
+
+    public CompletableFuture<T> get(RedisCommand<?> command, boolean trackChanges, ReadMode readMode) {
+        Tuple<CompletableFuture<T>, Throwable> tuple = getTuple(command, trackChanges, readMode);
+        if (tuple.getT2() != null) {
+            CompletableFuture<T> result = new CompletableFuture<>();
+            result.completeExceptionally(tuple.getT2());
             return result;
         }
-        
-    protected boolean tryAcquireConnection(ClientConnectionsEntry entry) {
-        if (entry.getNodeType() == NodeType.SLAVE && entry.isFailed()) {
-            checkForReconnect(entry, null);
-            return false;
-        }
-        return true;
+        return tuple.getT1();
     }
 
-    protected T poll(ClientConnectionsEntry entry) {
-        return (T) entry.pollConnection();
+    public CompletableFuture<T> get(RedisCommand<?> command, ClientConnectionsEntry entry, boolean trackChanges) {
+        return acquireConnection(command, entry, trackChanges);
     }
 
-    protected RFuture<T> connect(ClientConnectionsEntry entry) {
-        return (RFuture<T>) entry.connect();
-    }
-
-    private void connectTo(ClientConnectionsEntry entry, RPromise<T> promise) {
-        if (promise.isDone()) {
-            releaseConnection(entry);
-            return;
-        }
-        T conn = poll(entry);
-        if (conn != null) {
-            if (!conn.isActive() && entry.getNodeType() == NodeType.SLAVE) {
-                entry.trySetupFistFail();
-            }
-
-            connectedSuccessful(entry, promise, conn);
-            return;
-        }
-
-        createConnection(entry, promise);
-    }
-
-    private void createConnection(ClientConnectionsEntry entry, RPromise<T> promise) {
-        RFuture<T> connFuture = connect(entry);
-        connFuture.onComplete((conn, e) -> {
+    protected final CompletableFuture<T> acquireConnection(RedisCommand<?> command, ClientConnectionsEntry entry, boolean trackChanges) {
+        ConnectionsHolder<T> handler = getConnectionHolder(entry, trackChanges);
+        CompletableFuture<T> result = handler.acquireConnection(command);
+        CompletableFuture<T> cancelableFuture = new CompletableFuture<>();
+        cancelableFuture.whenComplete((r, e) -> {
             if (e != null) {
-                promiseFailure(entry, promise, e);
-                return;
+                result.completeExceptionally(e);
             }
-
-            if (!conn.isActive()) {
-                promiseFailure(entry, promise, conn);
-                return;
-            }
-
-            connectedSuccessful(entry, promise, conn);
         });
-    }
-
-    private void connectedSuccessful(ClientConnectionsEntry entry, RPromise<T> promise, T conn) {
-        if (conn.isActive() && entry.getNodeType() == NodeType.SLAVE) {
-            entry.resetFirstFail();
-        }
-
-        if (!promise.trySuccess(conn)) {
-            releaseConnection(entry, conn);
-            releaseConnection(entry);
-        }
-    }
-
-    private void promiseFailure(ClientConnectionsEntry entry, RPromise<T> promise, Throwable cause) {
-        if (entry.getNodeType() == NodeType.SLAVE) {
-            entry.trySetupFistFail();
-            if (entry.isFailed()) {
-            checkForReconnect(entry, cause);
-        }
-        }
-
-        releaseConnection(entry);
-
-        promise.tryFailure(cause);
-    }
-
-    private void promiseFailure(ClientConnectionsEntry entry, RPromise<T> promise, T conn) {
-        if (entry.getNodeType() == NodeType.SLAVE) {
-            entry.trySetupFistFail();
-            if (entry.isFailed()) {
-            conn.closeAsync();
-            entry.getAllConnections().remove(conn);
-            checkForReconnect(entry, null);
-            } else {
-            releaseConnection(entry, conn);
-        }
-        } else {
-            releaseConnection(entry, conn);
-        }
-
-        releaseConnection(entry);
-
-        RedisConnectionException cause = new RedisConnectionException(conn + " is not active!");
-        promise.tryFailure(cause);
-    }
-
-    private void checkForReconnect(ClientConnectionsEntry entry, Throwable cause) {
-        if (masterSlaveEntry.slaveDown(entry, FreezeReason.RECONNECT)) {
-            log.error("slave " + entry.getClient().getAddr() + " has been disconnected after " 
-                        + config.getFailedSlaveCheckInterval() + " ms interval since moment of the first failed connection", cause);
-            scheduleCheck(entry);
-            }
-        }
-
-    private void scheduleCheck(ClientConnectionsEntry entry) {
-
-        connectionManager.getConnectionEventsHub().fireDisconnect(entry.getClient().getAddr());
-
-        connectionManager.newTimeout(timeout -> {
-            synchronized (entry) {
-                if (entry.getFreezeReason() != FreezeReason.RECONNECT
-                        || connectionManager.isShuttingDown()) {
-                    return;
+        result.whenComplete((r, e) -> {
+            if (e != null) {
+                if (entry.getNodeType() == NodeType.SLAVE) {
+                    FailedNodeDetector detector = entry.getClient().getConfig().getFailedNodeDetector();
+                    if (detector.isNodeFailed(entry.getClient().getAddr())) {
+                        shutdownAndReconnect(entry, detector, e);
+                    }
                 }
+                cancelableFuture.completeExceptionally(e);
+                return;
             }
 
-            RFuture<RedisConnection> connectionFuture = entry.getClient().connectAsync();
-            connectionFuture.onComplete((c, e) -> {
-                    synchronized (entry) {
-                        if (entry.getFreezeReason() != FreezeReason.RECONNECT) {
-                            return;
-                        }
-                    }
+            entry.addHandler(r, handler);
 
-                    if (e != null) {
-                        scheduleCheck(entry);
-                        return;
-                    }
-                    if (!c.isActive()) {
-                        c.closeAsync();
-                        scheduleCheck(entry);
-                        return;
-                    }
+            if (entry.getNodeType() == NodeType.SLAVE) {
+                entry.getClient().getConfig().getFailedNodeDetector()
+                        .onConnectSuccessful(entry.getClient().getAddr());
+            }
 
-                    RFuture<String> f = c.async(RedisCommands.PING);
-                    f.onComplete((t, ex) -> {
-                        try {
-                            synchronized (entry) {
-                                if (entry.getFreezeReason() != FreezeReason.RECONNECT) {
-                                    return;
-                                }
-                            }
-
-                            if ("PONG".equals(t)) {
-                                if (masterSlaveEntry.slaveUp(entry, FreezeReason.RECONNECT)) {
-                                    log.info("slave {} has been successfully reconnected", entry.getClient().getAddr());
-                                }
-                            } else {
-                                scheduleCheck(entry);
-                            }
-                        } finally {
-                            c.closeAsync();
-                        }
-                    });
-            });
-        }, config.getFailedSlaveReconnectionInterval(), TimeUnit.MILLISECONDS);
+            if (!cancelableFuture.complete(r)) {
+                entry.returnConnection(r);
+            }
+        });
+        return cancelableFuture;
     }
-
-    public void returnConnection(ClientConnectionsEntry entry, T connection) {
-        if (entry == null) {
-            connection.closeAsync();
-            return;
+        
+    private static int availabilityZoneStep(ReadMode readMode, boolean slave, boolean local) {
+        switch (readMode) {
+            case AZ_AFFINITY:
+                // slaves in the zone, then any slave, then the master (GLDE AZ_AFFINITY)
+                if (slave && local) {
+                    return 0;
+                }
+                if (slave) {
+                    return 1;
+                }
+                return 2;
+            case AZ_AFFINITY_SLAVES_AND_MASTER:
+                // slaves in the zone, then the master in the zone, then any slave, then the master
+                // (GLDE AZ_AFFINITY_REPLICAS_AND_PRIMARY)
+                if (slave && local) {
+                    return 0;
+                }
+                if (local) {
+                    return 1;
+                }
+                if (slave) {
+                    return 2;
+                }
+                return 3;
+            case AZ_AFFINITY_MASTER_SLAVE:
+                // any node in the zone, then any node (GLDE AZ_AFFINITY_ALL_NODES)
+                if (local) {
+                    return 0;
+                }
+                return 1;
+            default:
+                // ReadMode.isAvailabilityZoneAware accepted a mode that has no order here
+                throw new IllegalStateException("No availability zone order defined for readMode " + readMode);
         }
-        if (entry.isFreezed() && entry.getFreezeReason() != FreezeReason.SYSTEM) {
-            connection.closeAsync();
-            entry.getAllConnections().remove(connection);
-        } else {
-            releaseConnection(entry, connection);
+    }
+
+    private boolean isHealthy(ClientConnectionsEntry entry) {
+        if (entry.getNodeType() != NodeType.SLAVE) {
+            return true;
         }
-        releaseConnection(entry);
+
+        FailedNodeDetector detector = entry.getClient().getConfig().getFailedNodeDetector();
+        return !detector.isNodeFailed(entry.getClient().getAddr());
     }
 
-    protected void releaseConnection(ClientConnectionsEntry entry) {
-        entry.releaseConnection();
-    }
-
-    protected void releaseConnection(ClientConnectionsEntry entry, T conn) {
-        entry.releaseConnection(conn);
+    private void shutdownAndReconnect(ClientConnectionsEntry entry, FailedNodeDetector detector, Throwable cause) {
+        log.error("Redis node {} has been marked as failed according to the detection logic defined in {}",
+                entry.getClient().getAddr(), detector);
+        masterSlaveEntry.shutdownAndReconnectAsync(entry.getClient(), cause);
     }
 
 }

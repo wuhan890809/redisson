@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,15 +27,21 @@ public class LocalCachedMapDisable implements Serializable {
     private byte[][] keyHashes;
     private long timeout;
     private String requestId;
+    private boolean disableCache;
+
+    public boolean isDisableCache() {
+        return disableCache;
+    }
     
     public LocalCachedMapDisable() {
     }
 
-    public LocalCachedMapDisable(String requestId, byte[][] keyHashes, long timeout) {
+    public LocalCachedMapDisable(String requestId, byte[][] keyHashes, long timeout, boolean disableCache) {
         super();
         this.requestId = requestId;
         this.keyHashes = keyHashes;
         this.timeout = timeout;
+        this.disableCache = disableCache;
     }
     
     public String getRequestId() {

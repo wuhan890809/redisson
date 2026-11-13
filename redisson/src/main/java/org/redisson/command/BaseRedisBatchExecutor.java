@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,20 +15,20 @@
  */
 package org.redisson.command;
 
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-
 import org.redisson.api.BatchOptions;
 import org.redisson.client.codec.Codec;
 import org.redisson.client.protocol.BatchCommandData;
 import org.redisson.client.protocol.RedisCommand;
 import org.redisson.command.CommandBatchService.Entry;
+import org.redisson.config.DelayStrategy;
 import org.redisson.connection.ConnectionManager;
-import org.redisson.connection.MasterSlaveEntry;
 import org.redisson.connection.NodeSource;
 import org.redisson.liveobject.core.RedissonObjectBuilder;
-import org.redisson.misc.RPromise;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 
@@ -39,7 +39,7 @@ import org.redisson.misc.RPromise;
  */
 public class BaseRedisBatchExecutor<V, R> extends RedisExecutor<V, R> {
 
-    final ConcurrentMap<MasterSlaveEntry, Entry> commands;
+    final ConcurrentMap<NodeSource, Entry> commands;
     final BatchOptions options;
     final AtomicInteger index;
     
@@ -47,48 +47,59 @@ public class BaseRedisBatchExecutor<V, R> extends RedisExecutor<V, R> {
     
     @SuppressWarnings("ParameterNumber")
     public BaseRedisBatchExecutor(boolean readOnlyMode, NodeSource source, Codec codec, RedisCommand<V> command,
-                                  Object[] params, RPromise<R> mainPromise, boolean ignoreRedirect,
+                                  Object[] params, CompletableFuture<R> mainPromise, boolean ignoreRedirect,
                                   ConnectionManager connectionManager, RedissonObjectBuilder objectBuilder,
-                                  ConcurrentMap<MasterSlaveEntry, Entry> commands,
-                                  BatchOptions options, AtomicInteger index, AtomicBoolean executed, RedissonObjectBuilder.ReferenceType referenceType) {
+                                  ConcurrentMap<NodeSource, Entry> commands,
+                                  BatchOptions options, AtomicInteger index, AtomicBoolean executed, RedissonObjectBuilder.ReferenceType referenceType,
+                                  boolean noRetry) {
         
         super(readOnlyMode, source, codec, command, params, mainPromise, ignoreRedirect, connectionManager,
-                objectBuilder, referenceType);
+                objectBuilder, referenceType, noRetry,
+                retryAttempts(connectionManager, options),
+                retryInterval(connectionManager, options),
+                timeout(connectionManager, options),
+                false, null);
         this.commands = commands;
         this.options = options;
         this.index = index;
         this.executed = executed;
     }
 
-    protected final MasterSlaveEntry getEntry(NodeSource source) {
-        if (source.getSlot() != null) {
-            MasterSlaveEntry entry = connectionManager.getEntry(source.getSlot());
-            if (entry == null) {
-                throw connectionManager.createNodeNotFoundException(source);
-            }
-            return entry;
+    private static int timeout(ConnectionManager connectionManager, BatchOptions options) {
+        int result = connectionManager.getServiceManager().getConfig().getTimeout();
+        if (options.getResponseTimeout() > 0) {
+            result = (int) options.getResponseTimeout();
         }
-        return source.getEntry();
+        if (options.getSyncSlaves() > 0) {
+            result += (int) options.getSyncTimeout();
+        }
+        return result;
     }
-    
-    protected final void addBatchCommandData(Object[] batchParams) {
-        MasterSlaveEntry msEntry = getEntry(source);
-        Entry entry = commands.get(msEntry);
-        if (entry == null) {
-            entry = new Entry();
-            Entry oldEntry = commands.putIfAbsent(msEntry, entry);
-            if (oldEntry != null) {
-                entry = oldEntry;
-            }
+
+    private static DelayStrategy retryInterval(ConnectionManager connectionManager, BatchOptions options) {
+        if (options.getRetryDelay() != null) {
+            return options.getRetryDelay();
         }
+        return connectionManager.getServiceManager().getConfig().getRetryDelay();
+    }
+
+    private static int retryAttempts(ConnectionManager connectionManager, BatchOptions options) {
+        if (options.getRetryAttempts() >= 0) {
+            return options.getRetryAttempts();
+        }
+        return connectionManager.getServiceManager().getConfig().getRetryAttempts();
+    }
+
+    protected final void addBatchCommandData(Object[] batchParams) {
+        Entry entry = commands.computeIfAbsent(source, k -> new Entry());
 
         if (!readOnlyMode) {
             entry.setReadOnlyMode(false);
         }
 
         Codec codecToUse = getCodec(codec);
-        BatchCommandData<V, R> commandData = new BatchCommandData<V, R>(mainPromise, codecToUse, command, batchParams, index.incrementAndGet());
-        entry.getCommands().add(commandData);
+        BatchCommandData<V, R> commandData = new BatchCommandData<>(mainPromise, codecToUse, command, batchParams, index.incrementAndGet());
+        entry.addCommand(commandData);
     }
         
 }

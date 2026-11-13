@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,11 @@
  */
 package org.redisson.api;
 
+import org.redisson.api.annotation.EmptyAsAbsent;
+import org.redisson.api.geo.GeoEntry;
+import org.redisson.api.geo.GeoPosition;
 import org.redisson.api.geo.GeoSearchArgs;
+import org.redisson.api.geo.GeoUnit;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
@@ -112,6 +116,7 @@ public interface RGeoReactive<V> extends RScoredSortedSetReactive<V> {
      * @param members - objects
      * @return hash mapped by object
      */
+    @EmptyAsAbsent
     Mono<Map<V, String>> hash(V... members);
 
     /**
@@ -120,6 +125,7 @@ public interface RGeoReactive<V> extends RScoredSortedSetReactive<V> {
      * @param members - objects
      * @return geo position mapped by object
      */
+    @EmptyAsAbsent
     Mono<Map<V, GeoPosition>> pos(V... members);
 
     /**
@@ -143,35 +149,8 @@ public interface RGeoReactive<V> extends RScoredSortedSetReactive<V> {
      * @param args - search conditions object
      * @return list of memebers
      */
+    @EmptyAsAbsent
     Mono<List<V>> search(GeoSearchArgs args);
-
-    /*
-     * Use search() method instead
-     *
-     */
-    @Deprecated
-    Mono<List<V>> radius(double longitude, double latitude, double radius, GeoUnit geoUnit);
-    
-    /*
-     * Use search() method instead
-     *
-     */
-    @Deprecated
-    Mono<List<V>> radius(double longitude, double latitude, double radius, GeoUnit geoUnit, int count);
-
-    /*
-     * Use search() method instead
-     *
-     */
-    @Deprecated
-    Mono<List<V>> radius(double longitude, double latitude, double radius, GeoUnit geoUnit, GeoOrder geoOrder);
-    
-    /*
-     * Use search() method instead
-     *
-     */
-    @Deprecated
-    Mono<List<V>> radius(double longitude, double latitude, double radius, GeoUnit geoUnit, GeoOrder geoOrder, int count);
 
     /**
      * Returns the distance mapped by member of a sorted set,
@@ -194,35 +173,8 @@ public interface RGeoReactive<V> extends RScoredSortedSetReactive<V> {
      * @param args - search conditions object
      * @return distance mapped by object
      */
+    @EmptyAsAbsent
     Mono<Map<V, Double>> searchWithDistance(GeoSearchArgs args);
-
-    /*
-     * Use searchWithDistance() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, Double>> radiusWithDistance(double longitude, double latitude, double radius, GeoUnit geoUnit);
-
-    /*
-     * Use searchWithDistance() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, Double>> radiusWithDistance(double longitude, double latitude, double radius, GeoUnit geoUnit, int count);
-    
-    /*
-     * Use searchWithDistance() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, Double>> radiusWithDistance(double longitude, double latitude, double radius, GeoUnit geoUnit, GeoOrder geoOrder);
-    
-    /*
-     * Use searchWithDistance() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, Double>> radiusWithDistance(double longitude, double latitude, double radius, GeoUnit geoUnit, GeoOrder geoOrder, int count);
 
     /**
      * Returns the position mapped by member of a sorted set,
@@ -245,119 +197,8 @@ public interface RGeoReactive<V> extends RScoredSortedSetReactive<V> {
      * @param args - search conditions object
      * @return position mapped by object
      */
+    @EmptyAsAbsent
     Mono<Map<V, GeoPosition>> searchWithPosition(GeoSearchArgs args);
-
-    /*
-     * Use searchWithPosition() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, GeoPosition>> radiusWithPosition(double longitude, double latitude, double radius, GeoUnit geoUnit);
-
-    /*
-     * Use searchWithPosition() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, GeoPosition>> radiusWithPosition(double longitude, double latitude, double radius, GeoUnit geoUnit, int count);
-
-    /*
-     * Use searchWithPosition() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, GeoPosition>> radiusWithPosition(double longitude, double latitude, double radius, GeoUnit geoUnit, GeoOrder geoOrder);
-
-    /*
-     * Use searchWithPosition() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, GeoPosition>> radiusWithPosition(double longitude, double latitude, double radius, GeoUnit geoUnit, GeoOrder geoOrder, int count);
-    
-    /*
-     * Use search() method instead
-     *
-     */
-    @Deprecated
-    Mono<List<V>> radius(V member, double radius, GeoUnit geoUnit);
-
-    /*
-     * Use search() method instead
-     *
-     */
-    @Deprecated
-    Mono<List<V>> radius(V member, double radius, GeoUnit geoUnit, int count);
-
-    /*
-     * Use search() method instead
-     *
-     */
-    @Deprecated
-    Mono<List<V>> radius(V member, double radius, GeoUnit geoUnit, GeoOrder geoOrder);
-
-    /*
-     * Use search() method instead
-     *
-     */
-    @Deprecated
-    Mono<List<V>> radius(V member, double radius, GeoUnit geoUnit, GeoOrder geoOrder, int count);
-    
-    /*
-     * Use searchWithDistance() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, Double>> radiusWithDistance(V member, double radius, GeoUnit geoUnit);
-
-    /*
-     * Use searchWithDistance() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, Double>> radiusWithDistance(V member, double radius, GeoUnit geoUnit, int count);
-
-    /*
-     * Use searchWithDistance() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, Double>> radiusWithDistance(V member, double radius, GeoUnit geoUnit, GeoOrder geoOrder);
-
-    /*
-     * Use searchWithDistance() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, Double>> radiusWithDistance(V member, double radius, GeoUnit geoUnit, GeoOrder geoOrder, int count);
-    
-    /*
-     * Use searchWithPosition() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, GeoPosition>> radiusWithPosition(V member, double radius, GeoUnit geoUnit);
-
-    /*
-     * Use searchWithPosition() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, GeoPosition>> radiusWithPosition(V member, double radius, GeoUnit geoUnit, int count);
-
-    /*
-     * Use searchWithPosition() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, GeoPosition>> radiusWithPosition(V member, double radius, GeoUnit geoUnit, GeoOrder geoOrder);
-
-    /*
-     * Use searchWithPosition() method instead
-     *
-     */
-    @Deprecated
-    Mono<Map<V, GeoPosition>> radiusWithPosition(V member, double radius, GeoUnit geoUnit, GeoOrder geoOrder, int count);
 
     /**
      * Finds the members of a sorted set,
@@ -382,48 +223,6 @@ public interface RGeoReactive<V> extends RScoredSortedSetReactive<V> {
      */
     Mono<Long> storeSearchTo(String destName, GeoSearchArgs args);
 
-    /*
-     * Use storeSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreTo(String destName, double longitude, double latitude, double radius, GeoUnit geoUnit);
-
-    /*
-     * Use storeSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreTo(String destName, double longitude, double latitude, double radius, GeoUnit geoUnit, int count);
-
-    /*
-     * Use storeSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreTo(String destName, double longitude, double latitude, double radius, GeoUnit geoUnit, GeoOrder geoOrder, int count);
-
-    /*
-     * Use storeSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreTo(String destName, V member, double radius, GeoUnit geoUnit);
-
-    /*
-     * Use storeSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreTo(String destName, V member, double radius, GeoUnit geoUnit, int count);
-
-    /*
-     * Use storeSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreTo(String destName, V member, double radius, GeoUnit geoUnit, GeoOrder geoOrder, int count);
-
     /**
      * Finds the members of a sorted set,
      * which are within the borders of specified search conditions.
@@ -447,47 +246,4 @@ public interface RGeoReactive<V> extends RScoredSortedSetReactive<V> {
      */
     RFuture<Long> storeSortedSearchTo(String destName, GeoSearchArgs args);
 
-    /*
-     * Use storeSortedSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreSortedTo(String destName, double longitude, double latitude, double radius, GeoUnit geoUnit);
-
-    /*
-     * Use storeSortedSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreSortedTo(String destName, double longitude, double latitude, double radius, GeoUnit geoUnit, int count);
-
-    /*
-     * Use storeSortedSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreSortedTo(String destName, double longitude, double latitude, double radius, GeoUnit geoUnit, GeoOrder geoOrder, int count);
-
-    /*
-     * Use storeSortedSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreSortedTo(String destName, V member, double radius, GeoUnit geoUnit);
-
-    /*
-     * Use storeSortedSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreSortedTo(String destName, V member, double radius, GeoUnit geoUnit, int count);
-
-    /*
-     * Use storeSortedSearchTo() method instead
-     *
-     */
-    @Deprecated
-    Mono<Long> radiusStoreSortedTo(String destName, V member, double radius, GeoUnit geoUnit, GeoOrder geoOrder, int count);
-
-    
 }

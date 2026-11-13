@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,10 @@
  */
 package org.redisson.executor;
 
+import org.redisson.api.RScheduledFuture;
+
 import java.util.concurrent.Delayed;
 import java.util.concurrent.TimeUnit;
-
-import org.redisson.api.RScheduledFuture;
-import org.redisson.misc.PromiseDelegator;
-import org.redisson.remote.RequestId;
 
 /**
  * 
@@ -28,15 +26,19 @@ import org.redisson.remote.RequestId;
  *
  * @param <V> value type
  */
-public class RedissonScheduledFuture<V> extends PromiseDelegator<V> implements RScheduledFuture<V> {
+public class RedissonScheduledFuture<V> extends RedissonExecutorFuture<V> implements RScheduledFuture<V> {
 
     private final long scheduledExecutionTime;
-    private final RequestId taskId;
+    private final RemotePromise<V> promise;
 
     public RedissonScheduledFuture(RemotePromise<V> promise, long scheduledExecutionTime) {
         super(promise);
         this.scheduledExecutionTime = scheduledExecutionTime;
-        this.taskId = promise.getRequestId();
+        this.promise = promise;
+    }
+
+    public RemotePromise<V> getInnerPromise() {
+        return promise;
     }
     
     @Override
@@ -61,9 +63,4 @@ public class RedissonScheduledFuture<V> extends PromiseDelegator<V> implements R
         return unit.convert(scheduledExecutionTime - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
     }
     
-    @Override
-    public String getTaskId() {
-        return taskId.toString();
-    }
-
 }

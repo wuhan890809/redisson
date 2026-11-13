@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,25 +18,26 @@ package org.redisson.reactive;
 import org.reactivestreams.Publisher;
 import org.redisson.RedissonObject;
 import org.redisson.RedissonTimeSeries;
+import org.redisson.ScanResult;
 import org.redisson.api.RFuture;
 import org.redisson.api.RTimeSeries;
 import org.redisson.api.RedissonReactiveClient;
 import org.redisson.client.RedisClient;
-import org.redisson.client.protocol.decoder.ListScanResult;
 import reactor.core.publisher.Flux;
 
 /**
  * 
  * @author Nikita Koksharov
  *
- * @param <V> value
+ * @param <V> value type
+ * @param <L> label type
  */
-public class RedissonTimeSeriesReactive<V> {
+public class RedissonTimeSeriesReactive<V, L> {
 
-    private final RTimeSeries<V> instance;
+    private final RTimeSeries<V, L> instance;
     private final RedissonReactiveClient redisson;
 
-    public RedissonTimeSeriesReactive(RTimeSeries<V> instance, RedissonReactiveClient redisson) {
+    public RedissonTimeSeriesReactive(RTimeSeries<V, L> instance, RedissonReactiveClient redisson) {
         this.instance = instance;
         this.redisson = redisson;
     }
@@ -44,7 +45,7 @@ public class RedissonTimeSeriesReactive<V> {
     public Publisher<V> iterator() {
         return Flux.create(new SetReactiveIterator<V>() {
             @Override
-            protected RFuture<ListScanResult<Object>> scanIterator(RedisClient client, long nextIterPos) {
+            protected RFuture<ScanResult<Object>> scanIterator(RedisClient client, String nextIterPos) {
                 return ((RedissonTimeSeries) instance).scanIteratorAsync(((RedissonObject) instance).getRawName(), client, nextIterPos, 10);
             }
         });

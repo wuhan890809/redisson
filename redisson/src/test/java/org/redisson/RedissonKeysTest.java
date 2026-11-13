@@ -1,19 +1,128 @@
 package org.redisson;
 
+import java.time.Instant;
+import java.util.concurrent.TimeUnit;
+import org.awaitility.Awaitility;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.redisson.ClusterRunner.ClusterProcesses;
-import org.redisson.RedisRunner.FailedToStartRedisException;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.redisson.api.*;
+import org.redisson.api.listener.FlushListener;
+import org.redisson.api.listener.NewObjectListener;
+import org.redisson.api.options.KeysScanOptions;
+import org.redisson.api.keys.MigrateArgs;
+import org.redisson.api.stream.StreamAddArgs;
+import org.redisson.api.stream.StreamCreateGroupArgs;
+import org.redisson.client.RedisException;
 import org.redisson.config.Config;
-import org.redisson.connection.balancer.RandomLoadBalancer;
+import org.redisson.config.PrefixNameMapper;
+import org.redisson.connection.MasterSlaveEntry;
+import org.redisson.config.Protocol;
+import org.redisson.client.protocol.Time;
+import org.testcontainers.containers.GenericContainer;
 
-import java.io.IOException;
+import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-public class RedissonKeysTest extends BaseTest {
+public class RedissonKeysTest extends RedisDockerTest {
+
+    @Test
+    public void testTime() {
+        Time time = redisson.getKeys().time();
+        Time asyncTime = redisson.getKeys().timeAsync().toCompletableFuture().join();
+
+        assertThat(time.getSeconds()).isPositive();
+        assertThat(time.getMicroseconds()).isBetween(0, 999999);
+        assertThat(asyncTime.getSeconds()).isPositive();
+        assertThat(asyncTime.getMicroseconds()).isBetween(0, 999999);
+    }
+
+    @Test
+    public void testNewObjectListener() {
+        testWithParams(redisson -> {
+            AtomicReference<String> ref = new AtomicReference<>();
+            int id = redisson.getKeys().addListener((NewObjectListener) name -> ref.set(name));
+
+            redisson.getBucket("test").set("123");
+
+            Awaitility.waitAtMost(Duration.ofMillis(500)).untilAsserted(() -> {
+                assertThat(ref.get()).isEqualTo("test");
+            });
+        }, NOTIFY_KEYSPACE_EVENTS, "En");
+    }
+
+    @Test
+    public void testDeleteListener() {
+        testWithParams(redisson -> {
+            AtomicReference<String> ref = new AtomicReference<>();
+            int id = redisson.getKeys().addListener((DeletedObjectListener) name -> ref.set(name));
+
+            redisson.getBucket("test").set("123");
+            redisson.getBucket("test").delete();
+
+            Awaitility.waitAtMost(Duration.ofMillis(500)).untilAsserted(() -> {
+                assertThat(ref.getAndSet(null)).isEqualTo("test");
+            });
+
+            redisson.getKeys().removeListener(id);
+
+            redisson.getBucket("test2").set("123");
+            redisson.getBucket("test2").delete();
+
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+
+            assertThat(ref.get()).isNull();
+        }, NOTIFY_KEYSPACE_EVENTS, "Eg");
+    }
+
+    @Test
+    public void testFlushListener() throws InterruptedException {
+        Config c = redisson.getConfig();
+        c.setProtocol(Protocol.RESP3);
+
+        RedissonClient r = Redisson.create(c);
+
+        AtomicInteger counter = new AtomicInteger();
+        int id = r.getKeys().addListener((FlushListener) address -> {
+            assertThat(address).isNotNull();
+            counter.incrementAndGet();
+        });
+        int id2 = r.getKeys().addListener((FlushListener) address -> {
+            assertThat(address).isNotNull();
+            counter.incrementAndGet();
+        });
+
+        r.getKeys().flushall();
+
+        Awaitility.waitAtMost(Duration.ofMillis(500)).untilAsserted(() -> {
+            assertThat(counter.get()).isEqualTo(2);
+        });
+
+        r.getKeys().removeListener(id);
+        r.getKeys().removeListener(id2);
+
+        r.getKeys().flushall();
+
+        Thread.sleep(100);
+
+        assertThat(counter.get()).isEqualTo(2);
+
+        r.shutdown();
+    }
 
     @Test
     public void testReadKeys() {
@@ -54,71 +163,70 @@ public class RedissonKeysTest extends BaseTest {
     public void testTouch() {
         redisson.getSet("test").add("1");
         redisson.getSet("test10").add("1");
-        
+
         assertThat(redisson.getKeys().touch("test")).isEqualTo(1);
         assertThat(redisson.getKeys().touch("test", "test2")).isEqualTo(1);
         assertThat(redisson.getKeys().touch("test3", "test2")).isEqualTo(0);
         assertThat(redisson.getKeys().touch("test3", "test10", "test")).isEqualTo(2);
     }
 
-    
+    @Test
+    public void testExistsInCluster() {
+        testInCluster(redisson -> {
+            int size = 10000;
+            List<String> list = new ArrayList<>();
+            for (int i = 0; i < size; i++) {
+                list.add("test" + i);
+                redisson.getBucket("test" + i).set(i);
+            }
+
+            assertThat(redisson.getKeys().countExists("test1", "test2", "test34", "test45", "asdfl;jasf")).isEqualTo(4);
+            long deletedSize = redisson.getKeys().delete(list.toArray(new String[list.size()]));
+
+            assertThat(deletedSize).isEqualTo(size);
+        });
+    }
+
     @Test
     public void testExists() {
         redisson.getSet("test").add("1");
         redisson.getSet("test10").add("1");
-        
+
         assertThat(redisson.getKeys().countExists("test")).isEqualTo(1);
         assertThat(redisson.getKeys().countExists("test", "test2")).isEqualTo(1);
         assertThat(redisson.getKeys().countExists("test3", "test2")).isEqualTo(0);
         assertThat(redisson.getKeys().countExists("test3", "test10", "test")).isEqualTo(2);
     }
-    
+
     @Test
     public void testType() {
         redisson.getSet("test").add("1");
-        
+
         assertThat(redisson.getKeys().getType("test")).isEqualTo(RType.SET);
         assertThat(redisson.getKeys().getType("test1")).isNull();
     }
-    
+
     @Test
     public void testEmptyKeys() {
-        Iterable<String> keysIterator = redisson.getKeys().getKeysByPattern("test*", 10);
+        Iterable<String> keysIterator = redisson.getKeys().getKeys(KeysScanOptions.defaults().pattern("test*").chunkSize(10));
+//        Iterable<String> keysIterator = redisson.getKeys().getKeysByPattern("test*", 10);
         assertThat(keysIterator.iterator().hasNext()).isFalse();
     }
-    
-    @Test
-    public void testKeysByPattern() throws FailedToStartRedisException, IOException, InterruptedException {
-        RedisRunner master1 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner master2 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner master3 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave1 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave2 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave3 = new RedisRunner().randomPort().randomDir().nosave();
 
-        
-        ClusterRunner clusterRunner = new ClusterRunner()
-                .addNode(master1, slave1)
-                .addNode(master2, slave2)
-                .addNode(master3, slave3);
-        ClusterProcesses process = clusterRunner.run();
-        
-        Config config = new Config();
-        config.useClusterServers()
-        .setLoadBalancer(new RandomLoadBalancer())
-        .addNodeAddress(process.getNodes().stream().findAny().get().getRedisServerAddressAndPort());
-        RedissonClient redisson = Redisson.create(config);
-        
-        int size = 10000;
-        for (int i = 0; i < size; i++) {
-            redisson.getBucket("test" + i).set(i);
-        }
-        
-        assertThat(redisson.getKeys().count()).isEqualTo(size);
-        
-        Long noOfKeysDeleted = 0L;
+    @Test
+    public void testKeysByPattern() {
+        testInCluster(redisson -> {
+            int size = 10000;
+            for (int i = 0; i < size; i++) {
+                redisson.getBucket("test" + i).set(i);
+            }
+
+            assertThat(redisson.getKeys().count()).isEqualTo(size);
+
+            Long noOfKeysDeleted = 0L;
             int chunkSize = 20;
-            Iterable<String> keysIterator = redisson.getKeys().getKeysByPattern("test*", chunkSize);
+//            Iterable<String> keysIterator = redisson.getKeys().getKeysByPattern("test*", chunkSize);
+            Iterable<String> keysIterator = redisson.getKeys().getKeys(KeysScanOptions.defaults().pattern("test*").chunkSize(chunkSize));
             Set<String> keys = new HashSet<>();
             for (String key : keysIterator) {
                 keys.add(key);
@@ -134,14 +242,27 @@ public class RedissonKeysTest extends BaseTest {
             if (!keys.isEmpty()) {
                 noOfKeysDeleted += redisson.getKeys().delete(keys.toArray(new String[keys.size()]));
             }
-        
-        assertThat(noOfKeysDeleted).isEqualTo(size);
-        
-        redisson.shutdown();
-        process.shutdown();
+
+            assertThat(noOfKeysDeleted).isEqualTo(size);
+        });
     }
 
-    
+    @Test
+    public void testKeysType() {
+        redisson.getBucket("test1").set("someValue");
+        redisson.getBucket("test2").set("someValue");
+
+        RStream<Object, Object> s = redisson.getStream("test12");
+        s.createGroup(StreamCreateGroupArgs.name("g").makeStream());
+        s.add(StreamAddArgs.entry("1", "2"));
+
+        Iterable<String> iter = redisson.getKeys().getKeys(KeysScanOptions.defaults().type(RType.OBJECT));
+        assertThat(iter).containsOnly("test1", "test2");
+
+        Iterable<String> iter2 = redisson.getKeys().getKeys(KeysScanOptions.defaults().type(RType.STREAM));
+        assertThat(iter2).containsOnly("test12");
+    }
+
     @Test
     public void testKeysIterablePattern() {
         redisson.getBucket("test1").set("someValue");
@@ -149,15 +270,12 @@ public class RedissonKeysTest extends BaseTest {
 
         redisson.getBucket("test12").set("someValue");
 
-        Iterator<String> iterator = redisson.getKeys().getKeysByPattern("test?").iterator();
-        for (; iterator.hasNext();) {
-            String key = iterator.next();
-            assertThat(key).isIn("test1", "test2");
-        }
+        Iterator<String> iterator = redisson.getKeys().getKeys(KeysScanOptions.defaults().pattern("test?")).iterator();
+        assertThat(iterator).toIterable().containsOnly("test1", "test2");
     }
 
     @Test
-    public void testKeysIterable() throws InterruptedException {
+    public void testKeysIterable() {
         Set<String> keys = new HashSet<String>();
         for (int i = 0; i < 115; i++) {
             String key = "key" + Math.random();
@@ -169,11 +287,54 @@ public class RedissonKeysTest extends BaseTest {
         Iterator<String> iterator = redisson.getKeys().getKeys().iterator();
         for (; iterator.hasNext();) {
             String key = iterator.next();
-            keys.remove(key);
+            keys.remove(redisson.getConfig().useSingleServer().getNameMapper().map(key));
             iterator.remove();
         }
         Assertions.assertEquals(0, keys.size());
         Assertions.assertFalse(redisson.getKeys().getKeys().iterator().hasNext());
+    }
+
+    @Test
+    public void testKeysAsyncIterable() {
+        Set<String> keys = new HashSet<String>();
+        for (int i = 0; i < 115; i++) {
+            String key = "key" + Math.random();
+            RBucket<String> bucket = redisson.getBucket(key);
+            bucket.set("someValue");
+        }
+        
+        AsyncIterator<String> iterator = redisson.getKeys().getKeysAsync();
+        CompletionStage<Void> f = iterateAll(iterator, keys);
+        f.toCompletableFuture().join();
+        assertThat(redisson.getKeys().count()).isEqualTo(keys.size());
+    }
+    
+    @Test
+    public void testKeysAsyncIterablePattern() {
+        Set<String> keys = new HashSet<String>();
+        for (int i = 0; i < 115; i++) {
+            String key = "key" + Math.random();
+            RBucket<String> bucket = redisson.getBucket(key);
+            bucket.set("someValue");
+        }
+        int limit = 23;
+        AsyncIterator<String> iterator = redisson.getKeys().getKeysAsync(KeysScanOptions.defaults().limit(limit));
+        CompletionStage<Void> f = iterateAll(iterator, keys);
+        f.toCompletableFuture().join();
+        assertThat(limit).isEqualTo(keys.size());
+    }
+    
+    public CompletionStage<Void> iterateAll(AsyncIterator<String> iterator, Set<String> keys) {
+        return iterator.hasNext().thenCompose(r -> {
+            if (r) {
+                return iterator.next().thenCompose(k -> {
+                    keys.add(k);
+                    return iterateAll(iterator, keys);
+                });
+            } else {
+                return CompletableFuture.completedFuture(null);
+            }
+        });
     }
 
     @Test
@@ -192,44 +353,24 @@ public class RedissonKeysTest extends BaseTest {
     }
 
     @Test
-    public void testDeleteInCluster() throws FailedToStartRedisException, IOException, InterruptedException {
-        RedisRunner master1 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner master2 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner master3 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave1 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave2 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner slave3 = new RedisRunner().randomPort().randomDir().nosave();
+    public void testDeleteInCluster() {
+        testInCluster(redisson -> {
+            int size = 10000;
+            List<String> list = new ArrayList<>();
+            for (int i = 0; i < size; i++) {
+                list.add("test" + i);
+                redisson.getBucket("test" + i).set(i);
+            }
 
-        
-        ClusterRunner clusterRunner = new ClusterRunner()
-                .addNode(master1, slave1)
-                .addNode(master2, slave2)
-                .addNode(master3, slave3);
-        ClusterProcesses process = clusterRunner.run();
-        
-        Config config = new Config();
-        config.useClusterServers()
-        .setLoadBalancer(new RandomLoadBalancer())
-        .addNodeAddress(process.getNodes().stream().findAny().get().getRedisServerAddressAndPort());
-        RedissonClient redisson = Redisson.create(config);
-        
-        int size = 10000;
-        List<String> list = new ArrayList<>();
-        for (int i = 0; i < size; i++) {
-            list.add("test" + i);
-            redisson.getBucket("test" + i).set(i);
-        }
-        
-        long deletedSize = redisson.getKeys().delete(list.toArray(new String[list.size()]));
-        
-        assertThat(deletedSize).isEqualTo(size);
-        
-        redisson.shutdown();
-        process.shutdown();
+            long deletedSize = redisson.getKeys().delete(list.toArray(new String[list.size()]));
+
+            assertThat(deletedSize).isEqualTo(size);
+        });
     }
-    
-    @Test
-    public void testDeleteByPattern() {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testDeleteByPattern(boolean unlinkMode) {
         RBucket<String> bucket = redisson.getBucket("test0");
         bucket.set("someValue3");
         assertThat(bucket.isExists()).isTrue();
@@ -246,13 +387,20 @@ public class RedissonKeysTest extends BaseTest {
         map2.fastPut("1", "5");
         assertThat(map2.isExists()).isTrue();
 
+        if(unlinkMode) {
+            assertThat(redisson.getKeys().unlinkByPattern("test?")).isEqualTo(4);
+            assertThat(redisson.getKeys().unlinkByPattern("test?")).isZero();
+        } else {
+            assertThat(redisson.getKeys().deleteByPattern("test?")).isEqualTo(4);
+            assertThat(redisson.getKeys().deleteByPattern("test?")).isZero();
+        }
 
-        Assertions.assertEquals(4, redisson.getKeys().deleteByPattern("test?"));
-        Assertions.assertEquals(0, redisson.getKeys().deleteByPattern("test?"));
+        assertThat(redisson.getKeys().count()).isZero();
     }
 
-    @Test
-    public void testDeleteByPatternBatch() {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testDeleteByPatternBatch(boolean unlinkMode) {
         RBucket<String> bucket = redisson.getBucket("test0");
         bucket.set("someValue3");
         assertThat(bucket.isExists()).isTrue();
@@ -271,12 +419,15 @@ public class RedissonKeysTest extends BaseTest {
 
 
         RBatch batch = redisson.createBatch();
-        batch.getKeys().deleteByPatternAsync("test?");
+        if(unlinkMode) {
+            batch.getKeys().unlinkByPatternAsync("test?");
+        } else {
+            batch.getKeys().deleteByPatternAsync("test?");
+        }
         BatchResult<?> r = batch.execute();
         Assertions.assertEquals(4L, r.getResponses().get(0));
     }
-    
-    
+
     @Test
     public void testFindKeys() {
         RBucket<String> bucket = redisson.getBucket("test1");
@@ -284,10 +435,12 @@ public class RedissonKeysTest extends BaseTest {
         RMap<String, String> map = redisson.getMap("test2");
         map.fastPut("1", "2");
 
-        Iterable<String> keys = redisson.getKeys().getKeysByPattern("test?");
+        Iterable<String> keys = redisson.getKeys().getKeys(KeysScanOptions.defaults().pattern("test?"));
+//        Iterable<String> keys = redisson.getKeys().getKeysByPattern("test?");
         assertThat(keys).containsOnly("test1", "test2");
 
-        Iterable<String> keys2 = redisson.getKeys().getKeysByPattern("test");
+        Iterable<String> keys2 = redisson.getKeys().getKeys(KeysScanOptions.defaults().pattern("test"));
+//        Iterable<String> keys2 = redisson.getKeys().getKeysByPattern("test");
         assertThat(keys2).isEmpty();
     }
 
@@ -320,6 +473,251 @@ public class RedissonKeysTest extends BaseTest {
         redisson.getBucket("test1").set(23);
         s = redisson.getKeys().count();
         assertThat(s).isEqualTo(1);
+    }
+
+    @Test
+    public void testMigrate(){
+        String password = "123456";
+        GenericContainer<?> redis = createContainer("--requirepass " + password);
+        redis.start();
+        Config config = createConfig(redis);
+        config.setPassword(password);
+        RedissonClient r2 = Redisson.create(config);
+        List<String> keys = Arrays.asList("{testMigrate}key1", "{testMigrate}key2");
+        for (String key : keys) {
+            redisson.getBucket(key).set(key);
+            r2.getBucket(key).delete();
+        }
+        redisson.getKeys()
+                .migrate(MigrateArgs.keys(keys.toArray(new String[0]))
+                        .host("host.docker.internal")
+                        .port(redis.getFirstMappedPort())
+                        .database(0)
+                        .timeout(5000)
+                        .password(password)
+                        .mode(MigrateMode.COPY_AND_REPLACE));
+
+        for (String key : keys) {
+            assertThat(key.equals(r2.getBucket(key).get()));
+        }
+    }
+
+    @Test
+    public void testExpire() {
+        Long s = redisson.getKeys().count();
+        assertThat(s).isEqualTo(0);
+
+        redisson.getBucket("expire-test1").set(23, Duration.ofHours(1));
+        redisson.getBucket("expire-test2").set(23, Duration.ofHours(1));
+        s = redisson.getKeys().expire(Duration.ofDays(1), new String[]{"expire-test1", "expire-test2"});
+        assertThat(s).isEqualTo(2);
+
+        long ttl1 = redisson.getBucket("expire-test1").remainTimeToLive();
+        long ttl2 = redisson.getBucket("expire-test2").remainTimeToLive();
+        assertThat(ttl1).isGreaterThan(TimeUnit.HOURS.toMillis(23));
+        assertThat(ttl2).isGreaterThan(TimeUnit.HOURS.toMillis(23));
+
+        long ts = System.currentTimeMillis() + TimeUnit.DAYS.toMillis(2);
+        s = redisson.getKeys().expireAt(Instant.ofEpochMilli(ts), "expire-test1", "expire-test2");
+        assertThat(s).isEqualTo(2);
+
+        ttl1 = redisson.getBucket("expire-test1").remainTimeToLive();
+        assertThat(ttl1).isGreaterThan(TimeUnit.DAYS.toMillis(1));
+        ttl2 = redisson.getBucket("expire-test2").remainTimeToLive();
+        assertThat(ttl2).isGreaterThan(TimeUnit.DAYS.toMillis(1));
+
+        s = redisson.getKeys().expire(Duration.ofDays(1), "expire-miss");
+        assertThat(s).isEqualTo(0);
+
+        s = redisson.getKeys().expireAt(Instant.ofEpochMilli(ts), "expire-miss");
+        assertThat(s).isEqualTo(0);
+    }
+
+    private static GenericContainer<?> redis812;
+    private static RedissonClient redisson812;
+
+    @BeforeAll
+    static void startRedis812() {
+        redis812 = createRedis812();
+        redis812.start();
+        redisson812 = Redisson.create(createConfig(redis812));
+    }
+
+    @AfterAll
+    static void stopRedis812() {
+        redisson812.shutdown();
+        redis812.stop();
+    }
+
+    @Test
+    public void testBless() {
+        RKeys keys = redisson812.getKeys();
+        redisson812.getBucket("testBless").set("v");
+
+        assertThat(keys.isBlessed("testBless")).isFalse();
+        assertThat(keys.bless("testBless")).isTrue();
+        assertThat(keys.bless("testBless")).isFalse();
+        assertThat(keys.isBlessed("testBless")).isTrue();
+
+        assertThat(keys.unbless("testBless")).isTrue();
+        assertThat(keys.unbless("testBless")).isFalse();
+        assertThat(keys.isBlessed("testBless")).isFalse();
+    }
+
+    @Test
+    public void testBlessMissingKey() {
+        RKeys keys = redisson812.getKeys();
+        assertThatThrownBy(() -> keys.bless("testBlessMissingKey"))
+                .isInstanceOf(RedisException.class).hasMessageContaining("no such key");
+        assertThatThrownBy(() -> keys.unbless("testBlessMissingKey"))
+                .isInstanceOf(RedisException.class).hasMessageContaining("no such key");
+        assertThatThrownBy(() -> keys.isBlessed("testBlessMissingKey"))
+                .isInstanceOf(RedisException.class).hasMessageContaining("no such key");
+    }
+
+    @Test
+    public void testBlessBelongsToTheKey() {
+        RKeys keys = redisson812.getKeys();
+        RBucket<String> bucket = redisson812.getBucket("testBlessBelongsToTheKey");
+        bucket.set("v1");
+        keys.bless(bucket.getName());
+
+        bucket.set("v2");
+        assertThat(keys.isBlessed(bucket.getName())).isTrue();
+        bucket.rename("testBlessBelongsToTheKey2");
+        assertThat(keys.isBlessed(bucket.getName())).isTrue();
+
+        bucket.delete();
+        bucket.set("v3");
+        assertThat(keys.isBlessed(bucket.getName())).isFalse();
+    }
+
+    @Test
+    public void testGetBlessedKeys() {
+        RKeys keys = redisson812.getKeys();
+        keys.flushall();
+        Set<String> blessed = new HashSet<>();
+        for (int i = 0; i < 50; i++) {
+            redisson812.getBucket("testGetBlessedKeys" + i).set(i);
+            if (i % 3 == 0) {
+                keys.bless("testGetBlessedKeys" + i);
+                blessed.add("testGetBlessedKeys" + i);
+            }
+        }
+
+        assertThat(keys.getBlessedKeys()).containsExactlyInAnyOrderElementsOf(blessed);
+        assertThat(new HashSet<>(toList(keys.getBlessedKeys(2)))).isEqualTo(blessed);
+        assertThat(new HashSet<>(toList(keys.getBlessedKeys(0)))).isEqualTo(blessed);
+
+        Set<String> async = new HashSet<>();
+        AsyncIterator<String> iterator = keys.getBlessedKeysAsync(3);
+        while (iterator.hasNext().toCompletableFuture().join()) {
+            async.add(iterator.next().toCompletableFuture().join());
+        }
+        assertThat(async).isEqualTo(blessed);
+    }
+
+    @Test
+    public void testGetBlessedKeysIteratorRemove() {
+        RKeys keys = redisson812.getKeys();
+        keys.flushall();
+        redisson812.getBucket("testGetBlessedKeysIteratorRemove").set("v");
+        keys.bless("testGetBlessedKeysIteratorRemove");
+
+        Iterator<String> iterator = keys.getBlessedKeys().iterator();
+        assertThat(iterator.next()).isEqualTo("testGetBlessedKeysIteratorRemove");
+        assertThatThrownBy(iterator::remove).isInstanceOf(UnsupportedOperationException.class);
+
+        assertThat(keys.isBlessed("testGetBlessedKeysIteratorRemove")).isTrue();
+    }
+
+    @Test
+    public void testBlessWithNameMapper() {
+        Config config = createConfig(redis812);
+        PrefixNameMapper mapper = new PrefixNameMapper();
+        mapper.setPrefix("mapped:");
+        config.useSingleServer().setNameMapper(mapper);
+        RedissonClient client = Redisson.create(config);
+        try {
+            client.getKeys().flushall();
+            client.getBucket("a").set("v");
+            RKeys keys = client.getKeys();
+
+            assertThat(keys.bless("a")).isTrue();
+            assertThat(redisson812.getKeys().isBlessed("mapped:a")).isTrue();
+            assertThat(keys.isBlessed("a")).isTrue();
+            assertThat(keys.getBlessedKeys()).containsExactly("a");
+            assertThat(client.reactive().getKeys().getBlessedKeys().collectList().block())
+                    .containsExactly("a");
+            assertThat(keys.unbless("a")).isTrue();
+            assertThat(redisson812.getKeys().isBlessed("mapped:a")).isFalse();
+        } finally {
+            client.shutdown();
+        }
+    }
+
+    @Test
+    public void testBlessBatch() {
+        redisson812.getBucket("testBlessBatch").set("v");
+
+        RBatch batch = redisson812.createBatch();
+        RFuture<Boolean> bless = batch.getKeys().blessAsync("testBlessBatch");
+        RFuture<Boolean> isBlessed = batch.getKeys().isBlessedAsync("testBlessBatch");
+        RFuture<Boolean> unbless = batch.getKeys().unblessAsync("testBlessBatch");
+        batch.execute();
+
+        assertThat(bless.toCompletableFuture().join()).isTrue();
+        assertThat(isBlessed.toCompletableFuture().join()).isTrue();
+        assertThat(unbless.toCompletableFuture().join()).isTrue();
+    }
+
+    @Test
+    public void testBlessInCluster() {
+        withNewCluster("src/test/resources/docker-compose-redis-8.12-cluster.yml", data -> {
+            RKeys keys = data.redisson().getKeys();
+            Set<String> blessed = new HashSet<>();
+            for (int i = 0; i < 60; i++) {
+                String name = "testBlessInCluster" + i;
+                data.redisson().getBucket(name).set(i);
+                if (i % 2 == 0) {
+                    assertThat(keys.bless(name)).isTrue();
+                    blessed.add(name);
+                }
+            }
+            Set<Integer> masters = new HashSet<>();
+            for (String name : blessed) {
+                int slot = keys.getSlot(name);
+                if (slot <= 5460) {
+                    masters.add(0);
+                } else if (slot <= 10922) {
+                    masters.add(1);
+                } else {
+                    masters.add(2);
+                }
+            }
+            assertThat(masters).containsExactlyInAnyOrder(0, 1, 2);
+
+            Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                    assertThat(new HashSet<>(toList(keys.getBlessedKeys(5)))).isEqualTo(blessed));
+            Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                    assertThat(keys.isBlessed("testBlessInCluster0")).isTrue());
+            Set<String> async = new HashSet<>();
+            AsyncIterator<String> iterator = keys.getBlessedKeysAsync();
+            while (iterator.hasNext().toCompletableFuture().join()) {
+                async.add(iterator.next().toCompletableFuture().join());
+            }
+            assertThat(async).isEqualTo(blessed);
+            assertThat(data.redisson().reactive().getKeys().getBlessedKeys().collectList().block())
+                    .containsExactlyInAnyOrderElementsOf(blessed);
+            assertThat(data.redisson().rxJava().getKeys().getBlessedKeys().toList().blockingGet())
+                    .containsExactlyInAnyOrderElementsOf(blessed);
+        });
+    }
+
+    private static List<String> toList(Iterable<String> iterable) {
+        List<String> list = new ArrayList<>();
+        iterable.forEach(list::add);
+        return list;
     }
 
 }

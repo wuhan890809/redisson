@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,18 +15,21 @@
  */
 package org.redisson.api;
 
+import io.reactivex.rxjava3.core.Flowable;
+import io.reactivex.rxjava3.core.Maybe;
+import io.reactivex.rxjava3.core.Single;
+import org.redisson.api.RScoredSortedSet.Aggregate;
+import org.redisson.api.scoredsortedset.ScoredSortedSetMoveArgs;
+import org.redisson.api.scoredsortedset.ScoredSortedSetMoveEndArgs;
+import org.redisson.client.protocol.RankedEntry;
+import org.redisson.client.protocol.ScoredEntry;
+
+import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-
-import org.redisson.api.RScoredSortedSet.Aggregate;
-import org.redisson.client.protocol.ScoredEntry;
-
-import io.reactivex.rxjava3.core.Flowable;
-import io.reactivex.rxjava3.core.Maybe;
-import io.reactivex.rxjava3.core.Single;
 
 /**
  * RxJava2 interface for scored sorted set data structure.
@@ -44,7 +47,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * <p>
      * Requires <b>Redis 5.0.0 and higher.</b>
      * 
-     * @param queueNames - names of queue
+     * @param queueNames name of queues
      * @param timeout how long to wait before giving up, in units of
      *        {@code unit}
      * @param unit a {@code TimeUnit} determining how to interpret the
@@ -52,7 +55,59 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @return the tail element, or {@code null} if all sorted sets are empty 
      */
     Maybe<V> pollLastFromAny(long timeout, TimeUnit unit, String... queueNames);
-    
+
+    /**
+     * Removes and returns first available tail elements of <b>any</b> sorted set,
+     * waiting up to the specified wait time if necessary for elements to become available
+     * in any of defined sorted sets <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the tail elements
+     */
+    Maybe<List<V>> pollLastFromAny(Duration duration, int count, String... queueNames);
+
+    /**
+     * Removes and returns first available tail elements
+     * of <b>any</b> sorted set <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the tail elements
+     */
+    Maybe<List<V>> pollLastFromAny(int count, String... queueNames);
+
+    /**
+     * Removes and returns first available tail entries
+     * of <b>any</b> sorted set <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param count entries amount
+     * @param queueNames name of queues
+     * @return the head entries
+     */
+    Maybe<Map<String, Map<V, Double>>> pollLastEntriesFromAny(int count, String... queueNames);
+
+    /**
+     * Removes and returns first available tail entries of <b>any</b> sorted set,
+     * waiting up to the specified wait time if necessary for elements to become available
+     * in any of defined sorted sets <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count entries amount
+     * @param queueNames name of queues
+     * @return the tail entries
+     */
+    Maybe<Map<String, Map<V, Double>>> pollLastEntriesFromAny(Duration duration, int count, String... queueNames);
+
     /**
      * Removes and returns first available head element of <b>any</b> sorted set,
      * waiting up to the specified wait time if necessary for an element to become available
@@ -60,7 +115,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * <p>
      * Requires <b>Redis 5.0.0 and higher.</b>
      * 
-     * @param queueNames - names of queue
+     * @param queueNames name of queues
      * @param timeout how long to wait before giving up, in units of
      *        {@code unit}
      * @param unit a {@code TimeUnit} determining how to interpret the
@@ -69,7 +124,59 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      *  
      */
     Maybe<V> pollFirstFromAny(long timeout, TimeUnit unit, String... queueNames);
-    
+
+    /**
+     * Removes and returns first available head elements of <b>any</b> sorted set,
+     * waiting up to the specified wait time if necessary for elements to become available
+     * in any of defined sorted sets <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the head elements
+     */
+    Maybe<List<V>> pollFirstFromAny(Duration duration, int count, String... queueNames);
+
+    /**
+     * Removes and returns first available head elements
+     * of <b>any</b> sorted set <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the head elements
+     */
+    Maybe<List<V>> pollFirstFromAny(int count, String... queueNames);
+
+    /**
+     * Removes and returns first available head entries
+     * of <b>any</b> sorted set <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param count entries amount
+     * @param queueNames name of queues
+     * @return the head elements
+     */
+    Maybe<Map<String, Map<V, Double>>> pollFirstEntriesFromAny(int count, String... queueNames);
+
+    /**
+     * Removes and returns first available head entries of <b>any</b> sorted set,
+     * waiting up to the specified wait time if necessary for elements to become available
+     * in any of defined sorted sets <b>including</b> this one.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count entries amount
+     * @param queueNames name of queues
+     * @return the head entries
+     */
+    Maybe<Map<String, Map<V, Double>>> pollFirstEntriesFromAny(Duration duration, int count, String... queueNames);
+
     /**
      * Removes and returns the head element or {@code null} if this sorted set is empty.
      * <p>
@@ -82,7 +189,30 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @return the head element, 
      *         or {@code null} if this sorted set is empty
      */
+    @Deprecated
     Maybe<V> pollFirst(long timeout, TimeUnit unit);
+
+    /**
+     * Removes and returns the head element or {@code null} if this sorted set is empty.
+     * <p>
+     * Requires <b>Redis 5.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @return the head element,
+     *         or {@code null} if this sorted set is empty
+     */
+    Maybe<V> pollFirst(Duration duration);
+
+    /**
+     * Removes and returns the head elements.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count elements amount
+     * @return the head element
+     */
+    Maybe<List<V>> pollFirst(Duration duration, int count);
 
     /**
      * Removes and returns the tail element or {@code null} if this sorted set is empty.
@@ -95,15 +225,36 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      *        {@code timeout} parameter
      * @return the tail element or {@code null} if this sorted set is empty
      */
+    @Deprecated
     Maybe<V> pollLast(long timeout, TimeUnit unit);
-    
+
+    /**
+     * Removes and returns the tail element or {@code null} if this sorted set is empty.
+     * <p>
+     * Requires <b>Redis 5.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @return the tail element or {@code null} if this sorted set is empty
+     */
+    Maybe<V> pollLast(Duration duration);
+
+    /**
+     * Removes and returns the tail elements.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @return the tail elements
+     */
+    Maybe<List<V>> pollLast(Duration duration, int count);
+
     /**
      * Removes and returns the head elements of this sorted set.
      *
      * @param count - elements amount
      * @return the head elements of this sorted set
      */
-    Single<Collection<V>> pollFirst(int count);
+    Maybe<Collection<V>> pollFirst(int count);
 
     /**
      * Removes and returns the tail elements of this sorted set.
@@ -111,7 +262,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param count - elements amount
      * @return the tail elements of this sorted set
      */
-    Single<Collection<V>> pollLast(int count);
+    Maybe<Collection<V>> pollLast(int count);
 
     /**
      * Removes and returns the head element or {@code null} if this sorted set is empty.
@@ -121,12 +272,111 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      */
     Maybe<V> pollFirst();
 
+
+    /**
+     * Removes and returns the head entry (value and its score) or {@code null} if this sorted set is empty.
+     *
+     * @return the head entry,
+     * or {@code null} if this sorted set is empty
+     */
+    Maybe<ScoredEntry<V>> pollFirstEntry();
+
+    /**
+     * Removes and returns the head entries (value and its score) of this sorted set.
+     *
+     * @param count entries amount
+     * @return the head entries of this sorted set
+     */
+    Maybe<List<ScoredEntry<V>>> pollFirstEntries(int count);
+
+    /**
+     * Removes and returns the head entries (value and its score).
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count entries amount
+     * @return the head entries
+     */
+    Maybe<List<ScoredEntry<V>>> pollFirstEntries(Duration duration, int count);
+
     /**
      * Removes and returns the tail element or {@code null} if this sorted set is empty.
      *
      * @return the tail element or {@code null} if this sorted set is empty
      */
     Maybe<V> pollLast();
+
+    /**
+     * Removes and returns the tail entry (value and its score) or {@code null} if this sorted set is empty.
+     *
+     * @return the tail entry or {@code null} if this sorted set is empty
+     */
+    Maybe<ScoredEntry<V>> pollLastEntry();
+
+    /**
+     * Removes and returns the tail entries (value and its score) of this sorted set.
+     *
+     * @param count entries amount
+     * @return the tail entries of this sorted set
+     */
+    Maybe<List<ScoredEntry<V>>> pollLastEntries(int count);
+
+    /**
+     * Removes and returns the head entries (value and its score).
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count entries amount
+     * @return the tail entries
+     */
+    Maybe<List<ScoredEntry<V>>> pollLastEntries(Duration duration, int count);
+
+    /**
+     * Removes the selected entries from this sorted set and adds them,
+     * with their scores, to the destination sorted set as a single atomic operation.
+     * Entries are selected from the lowest or the highest scored end, by score range or by value.
+     * <p>
+     * A value the destination already holds gets the score it had in this sorted set.
+     * The destination is created if needed, and this sorted set is deleted once its last entry is moved.
+     * In Redis Cluster both names must map to the same hash slot.
+     * <p>
+     * Uses {@code ZMOVE} command, or {@code ZMOVEMEMBER} command for values.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param args arguments object
+     * @return moved entries in selection order,
+     *         or an empty list if nothing was moved
+     */
+    Single<List<ScoredEntry<V>>> move(ScoredSortedSetMoveArgs args);
+
+    /**
+     * Removes the lowest or the highest scored entries from this sorted set and adds them,
+     * with their scores, to the destination sorted set as a single atomic operation.
+     * If this sorted set is empty, waits up to the defined <code>timeout</code>
+     * for an entry to become available.
+     * <p>
+     * Once an entry is available, up to the defined count of entries is moved
+     * without waiting for a full batch. Only this sorted set is waited on:
+     * a change of the destination doesn't end the wait.
+     * <p>
+     * The timeout is rounded down to whole seconds, a timeout under one second waits
+     * one second, and a zero timeout waits indefinitely. Inside a transaction,
+     * such as an atomic {@link RBatchRx}, it doesn't wait.
+     * <p>
+     * Uses {@code BZMOVE} command.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param timeout how long to wait before giving up
+     * @param args arguments object, defined by {@code first()} or {@code last()}
+     * @return moved entries in selection order,
+     *         or an empty list if the timeout elapsed
+     * @throws IllegalArgumentException if timeout is negative
+     */
+    Single<List<ScoredEntry<V>>> move(Duration timeout, ScoredSortedSetMoveEndArgs args);
 
     /**
      * Returns the head element or {@code null} if this sorted set is empty.
@@ -136,11 +386,25 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
     Maybe<V> first();
 
     /**
+     * Returns the head entry (value and its score) or {@code null} if this sorted set is empty.
+     *
+     * @return the head entry or {@code null} if this sorted set is empty
+     */
+    Maybe<ScoredEntry<V>> firstEntry();
+
+    /**
      * Returns the tail element or {@code null} if this sorted set is empty.
      *
      * @return the tail element or {@code null} if this sorted set is empty
      */
     Maybe<V> last();
+
+    /**
+     * Returns the tail entry (value and its score) or {@code null} if this sorted set is empty.
+     *
+     * @return the tail entry or {@code null} if this sorted set is empty
+     */
+    Maybe<ScoredEntry<V>> lastEntry();
 
     /**
      * Returns score of the head element or returns {@code null} if this sorted set is empty.
@@ -173,7 +437,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param count - values amount to return
      * @return random elements
      */
-    Single<Collection<V>> random(int count);
+    Maybe<Collection<V>> random(int count);
 
     /**
      * Returns random entries from this sorted set limited by <code>count</code>.
@@ -184,7 +448,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param count - entries amount to return
      * @return random entries
      */
-    Single<Map<V, Double>> randomEntries(int count);
+    Maybe<Map<V, Double>> randomEntries(int count);
 
     /**
      * Returns an iterator over elements in this set.
@@ -214,8 +478,49 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @return iterator
      */
     Flowable<V> iterator(String pattern, int count);
-    
+
+    /**
+     * Returns an iterator over elements in this set.
+     *
+     * @return iterator
+     */
     Flowable<V> iterator();
+
+    /**
+     * Returns an iterator over entries (value and its score) in this set.
+     *
+     * @return iterator
+     */
+    Flowable<ScoredEntry<V>> entryIterator();
+
+    /**
+     * Returns an iterator over entries (value and its score) in this set.
+     * If <code>pattern</code> is not null then only entries match this pattern are loaded.
+     *
+     * @param pattern search pattern
+     * @return iterator
+     */
+    Flowable<ScoredEntry<V>> entryIterator(String pattern);
+
+    /**
+     * Returns an iterator over entries (value and its score) in this set.
+     * Entries are loaded in batch. Batch size is defined by <code>count</code> param.
+     *
+     * @param count size of elements batch
+     * @return iterator
+     */
+    Flowable<ScoredEntry<V>> entryIterator(int count);
+
+    /**
+     * Returns an iterator over entries (value and its score) in this set.
+     * Entries are loaded in batch. Batch size is defined by <code>count</code> param.
+     * If pattern is not null then only entries match this pattern are loaded.
+     *
+     * @param pattern search pattern
+     * @param count size of entries batch
+     * @return iterator
+     */
+    Flowable<ScoredEntry<V>> entryIterator(String pattern, int count);
 
     /**
      * Removes values by score range.
@@ -250,7 +555,16 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @return rank or <code>null</code> if value does not exist
      */
     Maybe<Integer> rank(V o);
-    
+
+    /**
+     * Returns rank and score of specified <code>value</code>,
+     * with the ranks ordered from low to high.
+     *
+     * @param value object
+     * @return ranked entry or <code>null</code> if value does not exist
+     */
+    Maybe<RankedEntry<V>> rankEntry(V value);
+
     /**
      * Returns rank of value, with the scores ordered from high to low.
      * 
@@ -258,6 +572,15 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @return rank or <code>null</code> if value does not exist
      */
     Maybe<Integer> revRank(V o);
+
+    /**
+     * Returns rank and score of specified <code>value</code>,
+     * with the ranks ordered from high to low.
+     *
+     * @param value object
+     * @return ranked entry or <code>null</code> if value does not exist
+     */
+    Maybe<RankedEntry<V>> revRankEntry(V value);
 
     /**
      * Returns ranks of elements, with the scores ordered from high to low.
@@ -300,7 +623,47 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @return amount of added elements, not including already existing in this sorted set
      */
     Single<Integer> addAll(Map<V, Double> objects);
-    
+
+    /**
+     * Adds elements to this set only if they haven't been added before.
+     * <p>
+     * Requires <b>Redis 3.0.2 and higher.</b>
+     *
+     * @param objects map of elements to add
+     * @return amount of added elements
+     */
+    Single<Integer> addAllIfAbsent(Map<V, Double> objects);
+
+    /**
+     * Adds elements to this set only if they already exist.
+     * <p>
+     * Requires <b>Redis 3.0.2 and higher.</b>
+     *
+     * @param objects map of elements to add
+     * @return amount of added elements
+     */
+    Single<Integer> addAllIfExist(Map<V, Double> objects);
+
+    /**
+     * Adds elements to this set only if new scores greater than current score of existed elements.
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param objects map of elements to add
+     * @return amount of added elements
+     */
+    Single<Integer> addAllIfGreater(Map<V, Double> objects);
+
+    /**
+     * Adds elements to this set only if new scores less than current score of existed elements.
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param objects map of elements to add
+     * @return amount of added elements
+     */
+    Single<Integer> addAllIfLess(Map<V, Double> objects);
+
     /**
      * Adds element to this set, overrides previous score if it has been already added.
      * Finally return the rank of the item
@@ -330,15 +693,25 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
     Single<List<Integer>> addAndGetRevRank(Map<? extends V, Double> map);
     
     /**
+     * Use {@link #addIfAbsent(double, Object)} instead
+     *
+     * @param score - object score
+     * @param object - object itself
+     * @return <code>true</code> if element has added and <code>false</code> if not.
+     */
+    @Deprecated
+    Single<Boolean> tryAdd(double score, V object);
+
+    /**
      * Adds element to this set only if has not been added before.
      * <p>
      * Requires <b>Redis 3.0.2 and higher.</b>
      *
      * @param score - object score
      * @param object - object itself
-     * @return <code>true</code> if element has added and <code>false</code> if not.
+     * @return <code>true</code> if element added and <code>false</code> if not.
      */
-    Single<Boolean> tryAdd(double score, V object);
+    Single<Boolean> addIfAbsent(double score, V object);
 
     /**
      * Adds element to this set only if it's already exists.
@@ -372,6 +745,16 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @return <code>true</code> if element added and <code>false</code> if not.
      */
     Single<Boolean> addIfGreater(double score, V object);
+
+    /**
+     * Replaces a previous <code>oldObject</code> with a <code>newObject</code>.
+     * Returns <code>false</code> if previous object doesn't exist.
+     *
+     * @param oldObject old object
+     * @param newObject new object
+     * @return <code>true</code> if object has been replaced otherwise <code>false</code>.
+     */
+    Single<Boolean> replace(V oldObject, V newObject);
 
     /**
      * Removes a single instance of the specified element from this
@@ -562,7 +945,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param endIndex - end index
      * @return elements
      */
-    Single<Collection<V>> valueRange(int startIndex, int endIndex);
+    Maybe<Collection<V>> valueRange(int startIndex, int endIndex);
 
     /**
      * Returns entries (value and its score) by rank range. Indexes are zero based. 
@@ -572,7 +955,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param endIndex - end index
      * @return entries
      */
-    Single<Collection<ScoredEntry<V>>> entryRange(int startIndex, int endIndex);
+    Maybe<Collection<ScoredEntry<V>>> entryRange(int startIndex, int endIndex);
 
     /**
      * Returns all values between <code>startScore</code> and <code>endScore</code>.
@@ -588,7 +971,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param endScoreInclusive - end score inclusive
      * @return values
      */
-    Single<Collection<V>> valueRange(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive);
+    Maybe<Collection<V>> valueRange(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive);
 
     /**
      * Returns all entries (value and its score) between <code>startScore</code> and <code>endScore</code>.
@@ -604,7 +987,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param endScoreInclusive - end score inclusive
      * @return entries
      */
-    Single<Collection<ScoredEntry<V>>> entryRange(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive);
+    Maybe<Collection<ScoredEntry<V>>> entryRange(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive);
 
     /**
      * Returns all values between <code>startScore</code> and <code>endScore</code>.
@@ -622,7 +1005,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param count - amount of sorted data
      * @return values
      */
-    Single<Collection<V>> valueRange(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive, int offset, int count);
+    Maybe<Collection<V>> valueRange(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive, int offset, int count);
 
     /**
      * Returns all entries (value and its score) between <code>startScore</code> and <code>endScore</code>.
@@ -640,7 +1023,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param count - amount of sorted data
      * @return entries
      */
-    Single<Collection<ScoredEntry<V>>> entryRange(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive, int offset, int count);
+    Maybe<Collection<ScoredEntry<V>>> entryRange(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive, int offset, int count);
 
     /**
      * Returns values by rank range in reverse order. Indexes are zero based. 
@@ -650,7 +1033,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param endIndex - end index
      * @return elements
      */
-    Single<Collection<V>> valueRangeReversed(int startIndex, int endIndex);
+    Maybe<Collection<V>> valueRangeReversed(int startIndex, int endIndex);
     
     /**
      * Returns all values between <code>startScore</code> and <code>endScore</code> in reversed order.
@@ -666,7 +1049,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param endScoreInclusive - end score inclusive
      * @return values
      */
-    Single<Collection<V>> valueRangeReversed(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive);
+    Maybe<Collection<V>> valueRangeReversed(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive);
 
     /**
      * Returns all values between <code>startScore</code> and <code>endScore</code> in reversed order.
@@ -684,7 +1067,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param count - amount of sorted data
      * @return values
      */
-    Single<Collection<V>> valueRangeReversed(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive, int offset, int count);
+    Maybe<Collection<V>> valueRangeReversed(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive, int offset, int count);
     
     /**
      * Returns entries (value and its score) by rank range in reverse order. Indexes are zero based. 
@@ -694,7 +1077,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param endIndex - end index
      * @return entries
      */
-    Single<Collection<ScoredEntry<V>>> entryRangeReversed(int startIndex, int endIndex);
+    Maybe<Collection<ScoredEntry<V>>> entryRangeReversed(int startIndex, int endIndex);
     
     /**
      * Returns all entries (value and its score) between <code>startScore</code> and <code>endScore</code> in reversed order.
@@ -710,7 +1093,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param endScoreInclusive - end score inclusive
      * @return entries
      */
-    Single<Collection<ScoredEntry<V>>> entryRangeReversed(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive);
+    Maybe<Collection<ScoredEntry<V>>> entryRangeReversed(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive);
     
     /**
      * Returns all entries (value and its score) between <code>startScore</code> and <code>endScore</code> in reversed order.
@@ -728,7 +1111,7 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param count - amount of sorted data
      * @return entries
      */
-    Single<Collection<ScoredEntry<V>>> entryRangeReversed(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive, int offset, int count);
+    Maybe<Collection<ScoredEntry<V>>> entryRangeReversed(double startScore, boolean startScoreInclusive, double endScore, boolean endScoreInclusive, int offset, int count);
     
     
     /**
@@ -747,18 +1130,23 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * 
      * @return values
      */
-    Single<Collection<V>> readAll();
+    Maybe<Collection<V>> readAll();
 
     /**
+     * Use {@link #intersection(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets 
      * and store result to current ScoredSortedSet
      * 
      * @param names - names of ScoredSortedSet
      * @return length of intersection
      */
+    @Deprecated
     Single<Integer> intersection(String... names);
 
     /**
+     * Use {@link #intersection(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets with defined aggregation method 
      * and store result to current ScoredSortedSet
      * 
@@ -766,18 +1154,24 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param names - names of ScoredSortedSet
      * @return length of intersection
      */
+    @Deprecated
     Single<Integer> intersection(Aggregate aggregate, String... names);
 
     /**
+     * Use {@link #intersection(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets mapped to weight multiplier 
      * and store result to current ScoredSortedSet
      * 
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return length of intersection
      */
+    @Deprecated
     Single<Integer> intersection(Map<String, Double> nameWithWeight);
 
     /**
+     * Use {@link #intersection(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets mapped to weight multiplier 
      * with defined aggregation method 
      * and store result to current ScoredSortedSet
@@ -786,9 +1180,22 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return length of intersection
      */
+    @Deprecated
     Single<Integer> intersection(Aggregate aggregate, Map<String, Double> nameWithWeight);
-
+    
     /**
+     * Intersect provided ScoredSortedSets mapped to weight multiplier
+     * with defined aggregation method
+     * and store result to current ScoredSortedSet
+     *
+     * @param args object
+     * @return length of intersection
+     */
+    Single<Integer> intersection(SetIntersectionArgs args);
+    
+    /**
+     * Use {@link #readIntersection(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets
      * with current ScoredSortedSet without state change
      * <p>
@@ -797,9 +1204,12 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param names - names of ScoredSortedSet
      * @return result of intersection
      */
-    Single<Collection<V>> readIntersection(String... names);
+    @Deprecated
+    Maybe<Collection<V>> readIntersection(String... names);
 
     /**
+     * Use {@link #readIntersection(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets with current ScoredSortedSet using defined aggregation method
      * without state change
      * <p>
@@ -809,9 +1219,12 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param names - names of ScoredSortedSet
      * @return result of intersection
      */
-    Single<Collection<V>> readIntersection(Aggregate aggregate, String... names);
+    @Deprecated
+    Maybe<Collection<V>> readIntersection(Aggregate aggregate, String... names);
 
     /**
+     * Use {@link #readIntersection(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets mapped to weight multiplier
      * with current ScoredSortedSet without state change
      * <p>
@@ -820,9 +1233,12 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return result of intersection
      */
-    Single<Collection<V>> readIntersection(Map<String, Double> nameWithWeight);
+    @Deprecated
+    Maybe<Collection<V>> readIntersection(Map<String, Double> nameWithWeight);
 
     /**
+     * Use {@link #readIntersection(SetIntersectionArgs)} instead.
+     * <p>
      * Intersect provided ScoredSortedSets mapped to weight multiplier
      * with current ScoredSortedSet using defined aggregation method
      * without state change
@@ -833,18 +1249,67 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return result of intersection
      */
-    Single<Collection<V>> readIntersection(Aggregate aggregate, Map<String, Double> nameWithWeight);
+    @Deprecated
+    Maybe<Collection<V>> readIntersection(Aggregate aggregate, Map<String, Double> nameWithWeight);
 
     /**
+     * Intersect provided ScoredSortedSets
+     * with current ScoredSortedSet
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param args object
+     * @return result of intersection
+     */
+    Maybe<Collection<V>> readIntersection(SetIntersectionArgs args);
+
+    /**
+     * Intersect provided ScoredSortedSets
+     * with current ScoredSortedSet
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param args object
+     * @return result of intersection entries (value and its score)
+     */
+    Maybe<Collection<ScoredEntry<V>>> readIntersectionEntries(SetIntersectionArgs args);
+
+    /**
+     * Counts elements of set as a result of sets intersection with current set.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return amount of elements
+     */
+    Single<Integer> countIntersection(String... names);
+
+    /**
+     * Counts elements of set as a result of sets intersection with current set.
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @param limit - sets intersection limit
+     * @return amount of elements
+     */
+    Single<Integer> countIntersection(int limit, String... names);
+
+    /**
+     * Use {@link #union(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets 
      * and store result to current ScoredSortedSet
      * 
      * @param names - names of ScoredSortedSet
      * @return length of union
      */
+    @Deprecated
     Single<Integer> union(String... names);
 
     /**
+     * Use {@link #union(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets with defined aggregation method 
      * and store result to current ScoredSortedSet
      * 
@@ -852,18 +1317,24 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param names - names of ScoredSortedSet
      * @return length of union
      */
+    @Deprecated
     Single<Integer> union(Aggregate aggregate, String... names);
 
     /**
+     * Use {@link #union(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets mapped to weight multiplier 
      * and store result to current ScoredSortedSet
      * 
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return length of union
      */
+    @Deprecated
     Single<Integer> union(Map<String, Double> nameWithWeight);
 
     /**
+     * Use {@link #union(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets mapped to weight multiplier 
      * with defined aggregation method 
      * and store result to current ScoredSortedSet
@@ -872,9 +1343,22 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return length of union
      */
+    @Deprecated
     Single<Integer> union(Aggregate aggregate, Map<String, Double> nameWithWeight);
-
+    
     /**
+     * Union provided ScoredSortedSets mapped to weight multiplier
+     * with defined aggregation method
+     * and store result to current ScoredSortedSet
+     *
+     * @param args object
+     * @return length of union
+     */
+    Single<Integer> union(SetUnionArgs args);
+    
+    /**
+     * Use {@link #readUnion(SetUnionArgs)} instead.
+     * <p>
      * Union ScoredSortedSets specified by name with current ScoredSortedSet
      * without state change.
      * <p>
@@ -883,9 +1367,12 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param names - names of ScoredSortedSet
      * @return result of union
      */
-    Single<Collection<V>> readUnion(String... names);
+    @Deprecated
+    Maybe<Collection<V>> readUnion(String... names);
 
     /**
+     * Use {@link #readUnion(SetUnionArgs)} instead.
+     * <p>
      * Union ScoredSortedSets specified by name with defined aggregation method
      * and current ScoredSortedSet without state change.
      * <p>
@@ -895,9 +1382,12 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param names - names of ScoredSortedSet
      * @return result of union
      */
-    Single<Collection<V>> readUnion(Aggregate aggregate, String... names);
+    @Deprecated
+    Maybe<Collection<V>> readUnion(Aggregate aggregate, String... names);
 
     /**
+     * Use {@link #readUnion(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets mapped to weight multiplier
      * and current ScoredSortedSet without state change.
      * <p>
@@ -906,9 +1396,12 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return result of union
      */
-    Single<Collection<V>> readUnion(Map<String, Double> nameWithWeight);
+    @Deprecated
+    Maybe<Collection<V>> readUnion(Map<String, Double> nameWithWeight);
 
     /**
+     * Use {@link #readUnion(SetUnionArgs)} instead.
+     * <p>
      * Union provided ScoredSortedSets mapped to weight multiplier
      * with defined aggregation method
      * and current ScoredSortedSet without state change
@@ -919,7 +1412,32 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param nameWithWeight - name of ScoredSortedSet mapped to weight multiplier
      * @return result of union
      */
-    Single<Collection<V>> readUnion(Aggregate aggregate, Map<String, Double> nameWithWeight);
+    @Deprecated
+    Maybe<Collection<V>> readUnion(Aggregate aggregate, Map<String, Double> nameWithWeight);
+
+    /**
+     * Union provided ScoredSortedSets mapped to weight multiplier
+     * with defined aggregation method
+     * and current ScoredSortedSet without state change
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param args object
+     * @return result of union
+     */
+    Maybe<Collection<V>> readUnion(SetUnionArgs args);
+
+    /**
+     * Union provided ScoredSortedSets mapped to weight multiplier
+     * with defined aggregation method
+     * and current ScoredSortedSet without state change
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param args object
+     * @return result of union entries (value and its score)
+     */
+    Maybe<Collection<ScoredEntry<V>>> readUnionEntries(SetUnionArgs args);
 
     /**
      * Diff ScoredSortedSets specified by name
@@ -930,7 +1448,18 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @param names - name of sets
      * @return result of diff
      */
-    Single<Collection<V>> readDiff(String... names);
+    Maybe<Collection<V>> readDiff(String... names);
+
+    /**
+     * Diff ScoredSortedSets specified by name
+     * with current ScoredSortedSet without state change.
+     * <p>
+     * Requires <b>Redis 6.2.0 and higher.</b>
+     *
+     * @param names - name of sets
+     * @return result of diff entries (value and its score)
+     */
+    Maybe<Collection<ScoredEntry<V>>> readDiffEntries(String... names);
 
     /**
      * Diff provided ScoredSortedSets
@@ -972,5 +1501,20 @@ public interface RScoredSortedSetRx<V> extends RExpirableRx, RSortableRx<Set<V>>
      * @return stream of tail elements
      */
     Flowable<V> takeLastElements();
-    
+
+    /**
+     * Adds object event listener
+     *
+     * @see org.redisson.api.listener.TrackingListener
+     * @see org.redisson.api.listener.ScoredSortedSetAddListener
+     * @see org.redisson.api.listener.ScoredSortedSetRemoveListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
+     *
+     * @param listener - object event listener
+     * @return listener id
+     */
+    Single<Integer> addListener(ObjectListener listener);
+
+
 }

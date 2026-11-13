@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,11 +20,15 @@ import java.util.List;
 
 import org.reactivestreams.Publisher;
 import org.redisson.RedissonKeys;
+import org.redisson.ScanResult;
+import org.redisson.api.RFuture;
+import org.redisson.api.RType;
+import org.redisson.api.options.KeysScanOptions;
+import org.redisson.api.options.KeysScanParams;
 import org.redisson.client.RedisClient;
 import org.redisson.connection.MasterSlaveEntry;
 
 import io.reactivex.rxjava3.core.Flowable;
-import io.reactivex.rxjava3.functions.LongConsumer;
 import io.reactivex.rxjava3.processors.ReplayProcessor;
 
 /**
@@ -46,77 +50,61 @@ public class RedissonKeysRx {
         return getKeysByPattern(null);
     }
 
-    public Flowable<String> getKeys(int count) {
-        return getKeysByPattern(null, count);
-    }
-
-    public Flowable<String> getKeysByPattern(String pattern) {
-        return getKeysByPattern(pattern, 10);
-    }
-    
-    public Flowable<String> getKeysByPattern(String pattern, int count) {
-        List<Publisher<String>> publishers = new ArrayList<Publisher<String>>();
+    public Flowable<String> getKeys(KeysScanOptions options) {
+        KeysScanParams params = (KeysScanParams) options;
+        List<Publisher<String>> publishers = new ArrayList<>();
         for (MasterSlaveEntry entry : commandExecutor.getConnectionManager().getEntrySet()) {
-            publishers.add(createKeysIterator(entry, pattern, count));
+            publishers.add(createKeysIterator(entry, params.getPattern(), params.getChunkSize(), params.getType()));
         }
         return Flowable.merge(publishers);
     }
 
-    private Publisher<String> createKeysIterator(MasterSlaveEntry entry, String pattern, int count) {
+    public Flowable<String> getKeys(int count) {
+        return getKeys(KeysScanOptions.defaults().chunkSize(count));
+    }
+
+    public Flowable<String> getKeysByPattern(String pattern) {
+        return getKeys(KeysScanOptions.defaults().pattern(pattern));
+    }
+    
+    public Flowable<String> getKeysByPattern(String pattern, int count) {
+        return getKeys(KeysScanOptions.defaults().pattern(pattern).chunkSize(count));
+    }
+
+    public Flowable<String> getBlessedKeys() {
+        return getBlessedKeys(0);
+    }
+
+    public Flowable<String> getBlessedKeys(int chunkSize) {
+        List<Publisher<String>> publishers = new ArrayList<>();
+        for (MasterSlaveEntry entry : commandExecutor.getConnectionManager().getEntrySet()) {
+            ReplayProcessor<String> p = ReplayProcessor.create();
+            publishers.add(p.doOnRequest(new RxIteratorConsumer<String>(p) {
+                @Override
+                protected boolean tryAgain() {
+                    return false;
+                }
+
+                @Override
+                protected RFuture<ScanResult<Object>> scanIterator(RedisClient client, String nextIterPos) {
+                    return instance.blessScanIteratorAsync(client, entry, nextIterPos, chunkSize);
+                }
+            }));
+        }
+        return Flowable.merge(publishers);
+    }
+
+    private Publisher<String> createKeysIterator(MasterSlaveEntry entry, String pattern, int count, RType type) {
         ReplayProcessor<String> p = ReplayProcessor.create();
-        return p.doOnRequest(new LongConsumer() {
-
-            private RedisClient client;
-            private List<String> firstValues;
-            private long nextIterPos;
-            
-            private long currentIndex;
-            
+        return p.doOnRequest(new RxIteratorConsumer<String>(p) {
             @Override
-            public void accept(long value) {
-                currentIndex = value;
-                nextValues();
+            protected boolean tryAgain() {
+                return false;
             }
-            
-            protected void nextValues() {
-                instance.scanIteratorAsync(client, entry, nextIterPos, pattern, count).onComplete((res, e) -> {
-                    if (e != null) {
-                        p.onError(e);
-                        return;
-                    }
-                    
-                    client = res.getRedisClient();
-                    long prevIterPos = nextIterPos;
-                    if (nextIterPos == 0 && firstValues == null) {
-                        firstValues = (List<String>) (Object) res.getValues();
-                    } else if (res.getValues().equals(firstValues)) {
-                        p.onComplete();
-                        currentIndex = 0;
-                        return;
-                    }
 
-                    nextIterPos = res.getPos();
-                    if (prevIterPos == nextIterPos) {
-                        nextIterPos = -1;
-                    }
-                    for (Object val : res.getValues()) {
-                        p.onNext((String) val);
-                        currentIndex--;
-                        if (currentIndex == 0) {
-                            p.onComplete();
-                            return;
-                        }
-                    }
-                    if (nextIterPos == -1) {
-                        p.onComplete();
-                        currentIndex = 0;
-                    }
-                    
-                    if (currentIndex == 0) {
-                        return;
-                    }
-                    nextValues();
-                });
+            @Override
+            protected RFuture<ScanResult<Object>> scanIterator(RedisClient client, String nextIterPos) {
+                return instance.scanIteratorAsync(client, entry, nextIterPos, pattern, count, type);
             }
         });
     }

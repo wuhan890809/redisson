@@ -1,22 +1,45 @@
 package org.redisson.rx;
 
+import io.reactivex.rxjava3.observers.TestObserver;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.redisson.Redisson;
 import org.redisson.TestObject;
 import org.redisson.api.RScoredSortedSetRx;
+import org.redisson.api.RedissonClient;
+import org.redisson.api.scoredsortedset.ScoredSortedSetMoveArgs;
 import org.redisson.client.codec.StringCodec;
 import org.redisson.client.protocol.ScoredEntry;
+import org.testcontainers.containers.GenericContainer;
 
 public class RedissonScoredSortedSetRxTest extends BaseRxTest {
+
+    @Test
+    public void testEntryIterator() {
+        RScoredSortedSetRx<String> set = redisson.getScoredSortedSet("simple");
+        sync(set.add(1.1, "v1"));
+        sync(set.add(1.2, "v2"));
+        sync(set.add(1.3, "v3"));
+
+        Iterator<ScoredEntry<String>> iter = toIterator(set.entryIterator());
+        assertThat(iter).toIterable().containsExactly(new ScoredEntry<>(1.1, "v1"),
+                new ScoredEntry<>(1.2, "v2"), new ScoredEntry<>(1.3, "v3"));
+
+    }
 
     @Test
     public void testFirstLast() {
@@ -119,12 +142,12 @@ public class RedissonScoredSortedSetRxTest extends BaseRxTest {
     public void testIteratorSequence() {
         RScoredSortedSetRx<Integer> set = redisson.getScoredSortedSet("simple");
         for (int i = 0; i < 1000; i++) {
-            sync(set.add(i, Integer.valueOf(i)));
+            sync(set.add(i, i));
         }
 
         Set<Integer> setCopy = new HashSet<Integer>();
         for (int i = 0; i < 1000; i++) {
-            setCopy.add(Integer.valueOf(i));
+            setCopy.add(i);
         }
 
         checkIterator(set, setCopy);
@@ -316,6 +339,31 @@ public class RedissonScoredSortedSetRxTest extends BaseRxTest {
     }
 
     @Test
+    public void testEmptyCollectionResultsAsAbsent() {
+        RScoredSortedSetRx<String> set = redisson.getScoredSortedSet("{simple}:empty");
+
+        assertNoValues(set.readAll().test());
+        assertNoValues(set.valueRange(0, -1).test());
+        assertNoValues(set.entryRange(0, -1).test());
+        assertNoValues(set.random(1).test());
+        assertNoValues(set.randomEntries(1).test());
+        assertNoValues(set.pollFirst(1).test());
+        assertNoValues(set.pollLast(1).test());
+        assertNoValues(set.pollFirstEntries(1).test());
+        assertNoValues(set.pollLastEntries(1).test());
+        assertNoValues(set.readIntersection("{simple}:other").test());
+        assertNoValues(set.readUnion("{simple}:other").test());
+        assertNoValues(set.readDiff("{simple}:other").test());
+    }
+
+    private static void assertNoValues(TestObserver<?> observer) {
+        observer.awaitDone(1, TimeUnit.SECONDS);
+        observer.assertNoErrors();
+        observer.assertComplete();
+        observer.assertNoValues();
+    }
+
+    @Test
     public void testAddAndGet() throws InterruptedException {
         RScoredSortedSetRx<Integer> set = redisson.getScoredSortedSet("simple", StringCodec.INSTANCE);
         sync(set.add(1, 100));
@@ -328,10 +376,44 @@ public class RedissonScoredSortedSetRxTest extends BaseRxTest {
         RScoredSortedSetRx<Integer> set2 = redisson.getScoredSortedSet("simple", StringCodec.INSTANCE);
         sync(set2.add(100.2, 1));
 
-        Double res2 = sync(set2.addScore(1, new Double(12.1)));
+        Double res2 = sync(set2.addScore(1, 12.1));
         Assertions.assertTrue(new Double(112.3).compareTo(res2) == 0);
         res2 = sync(set2.getScore(1));
         Assertions.assertTrue(new Double(112.3).compareTo(res2) == 0);
+    }
+
+    // ZMOVE, BZMOVE and ZMOVEMEMBER ship in Redis 8.12, see createRedis812.
+    private static GenericContainer<?> redis812;
+    private static RedissonClient redisson812;
+
+    @BeforeAll
+    static void startRedis812() {
+        redis812 = createRedis812();
+        redis812.start();
+        redisson812 = Redisson.create(createConfig(redis812));
+    }
+
+    @AfterAll
+    static void stopRedis812() {
+        redisson812.shutdown();
+        redis812.stop();
+    }
+
+    @Test
+    public void testMove() {
+        RScoredSortedSetRx<String> set = redisson812.rxJava().getScoredSortedSet("testMoveRx");
+        sync(set.add(1, "a"));
+        sync(set.add(2, "b"));
+        sync(set.add(3, "c"));
+
+        assertThat(sync(set.move(ScoredSortedSetMoveArgs.to("testMoveRxDest").scoreRange(2, true, 3, true).count(1))))
+                .containsExactly(new ScoredEntry<>(2D, "b"));
+        assertThat(sync(set.move(ScoredSortedSetMoveArgs.to("testMoveRxDest").values("c").ifExists())))
+                .isEmpty();
+        assertThat(sync(set.move(Duration.ofSeconds(1), ScoredSortedSetMoveArgs.to("testMoveRxDest").last().count(5))))
+                .containsExactly(new ScoredEntry<>(3D, "c"), new ScoredEntry<>(1D, "a"));
+        assertThat(sync(set.move(Duration.ofSeconds(1), ScoredSortedSetMoveArgs.to("testMoveRxDest").last())))
+                .isEmpty();
     }
 
 }

@@ -1,36 +1,31 @@
 package org.redisson;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.awaitility.Awaitility.await;
+import org.awaitility.Awaitility;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.redisson.api.RLock;
+import org.redisson.api.RReadWriteLock;
+import org.redisson.api.RedissonClient;
 
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.awaitility.Awaitility;
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Test;
-import org.redisson.ClusterRunner.ClusterProcesses;
-import org.redisson.api.RLock;
-import org.redisson.api.RReadWriteLock;
-import org.redisson.api.RedissonClient;
-import org.redisson.config.Config;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import static org.assertj.core.api.Assertions.*;
+import static org.awaitility.Awaitility.await;
 
 public class RedissonReadWriteLockTest extends BaseConcurrentTest {
+
+    private static final Logger log = LoggerFactory.getLogger(RedissonReadWriteLockTest.class);
 
     @Test
     public void testReadLockExpiration() throws Exception{
@@ -70,10 +65,22 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
         thread2.join(300);
         thread3.start();
         thread3.join(300);
-        
+
         Awaitility.await().between(8, TimeUnit.SECONDS, 10, TimeUnit.SECONDS).untilTrue(flag);
     }
-    
+
+    @Test
+    public void testReadLockIsLocked() throws InterruptedException {
+        RReadWriteLock readWriteLock = redisson.getReadWriteLock("TEST");
+        RLock writeLock = readWriteLock.writeLock();
+        RLock readLock = readWriteLock.readLock();
+
+        writeLock.lock();
+        assertThat(readLock.isLocked()).isFalse();
+        assertThat(readLock.tryLock(10, TimeUnit.SECONDS)).isTrue();
+        assertThat(readLock.isLocked()).isTrue();
+    }
+
     @Test
     public void testReadLockExpirationRenewal() throws InterruptedException {
         int threadCount = 50;
@@ -99,12 +106,12 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
                 }
             });
         }
-                
+
         executorService.shutdown();
         assertThat(executorService.awaitTermination(180, TimeUnit.SECONDS)).isTrue();
         assertThat(exceptions.get()).isZero();
     }
-    
+
     @Test
     public void testName() throws InterruptedException, ExecutionException, TimeoutException {
         ExecutorService service = Executors.newFixedThreadPool(10);
@@ -134,11 +141,11 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
         assertThat(service.awaitTermination(1, TimeUnit.MINUTES)).isTrue();
     }
 
-    
+
     @Test
     public void testWriteLockExpiration() throws InterruptedException {
         RReadWriteLock rw1 = redisson.getReadWriteLock("test2s3");
-        
+
         RLock l1 = rw1.writeLock();
         assertThat(l1.tryLock(10000, 10000, TimeUnit.MILLISECONDS)).isTrue();
         RLock l2 = rw1.writeLock();
@@ -154,34 +161,18 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
             }
         });
     }
-    
-    @Test
-    public void testInCluster() throws Exception {
-        RedisRunner master1 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner master2 = new RedisRunner().randomPort().randomDir().nosave();
-        RedisRunner master3 = new RedisRunner().randomPort().randomDir().nosave();
 
-        ClusterRunner clusterRunner = new ClusterRunner()
-                .addNode(master1)
-                .addNode(master2)
-                .addNode(master3);
-        ClusterProcesses process = clusterRunner.run();
-        
-        Config config = new Config();
-        config.useClusterServers()
-        .addNodeAddress(process.getNodes().stream().findAny().get().getRedisServerAddressAndPort());
-        RedissonClient redisson = Redisson.create(config);
-        
-        RReadWriteLock s = redisson.getReadWriteLock("1234");
-        s.writeLock().lock();
-        s.readLock().lock();
-        s.readLock().unlock();
-        s.writeLock().unlock();
-        
-        redisson.shutdown();
-        process.shutdown();
+    @Test
+    public void testInCluster() {
+        testInCluster(redisson -> {
+            RReadWriteLock s = redisson.getReadWriteLock("1234");
+            s.writeLock().lock();
+            s.readLock().lock();
+            s.readLock().unlock();
+            s.writeLock().unlock();
+        });
     }
-    
+
     @Test
     public void testReadLockLeaseTimeoutDiffThreadsWRR() throws InterruptedException {
         RLock writeLock = redisson.getReadWriteLock("my_read_write_lock").writeLock();
@@ -193,7 +184,7 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
             readLock.lock();
             executed.incrementAndGet();
         });
-        
+
         Thread t2 = new Thread(() -> {
             RLock readLock = redisson.getReadWriteLock("my_read_write_lock").readLock();
             readLock.lock();
@@ -202,10 +193,10 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
 
         t1.start();
         t2.start();
-        
+
         await().atMost(11, TimeUnit.SECONDS).until(() -> executed.get() == 2);
     }
-    
+
     @Test
     public void testReadLockLeaseTimeoutDiffThreadsRRW() throws InterruptedException {
         new Thread(() -> {
@@ -218,7 +209,7 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
         }).start();
 
         Thread.sleep(5000);
-        
+
         new Thread(() -> {
             RLock readLock2 = redisson.getReadWriteLock("my_read_write_lock").readLock();
             try {
@@ -239,11 +230,11 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
                 e.printStackTrace();
             }
         }).start();
-        
+
         await().atMost(6, TimeUnit.SECONDS).untilTrue(executed);
     }
-    
-    
+
+
     @Test
     public void testReadLockLeaseTimeout() throws InterruptedException {
         RLock readLock = redisson.getReadWriteLock("my_read_write_lock").readLock();
@@ -259,17 +250,17 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
         RLock writeLock = redisson.getReadWriteLock("my_read_write_lock").writeLock();
         Assertions.assertTrue(writeLock.tryLock());
     }
-    
+
     @Test
     public void testWR() throws InterruptedException {
         RReadWriteLock rw = redisson.getReadWriteLock("my_read_write_lock");
         RLock writeLock = rw.writeLock();
         writeLock.lock();
-        
+
         rw.readLock().lock();
         assertThat(writeLock.isLocked()).isTrue();
         rw.readLock().unlock();
-        
+
         assertThat(writeLock.isLocked()).isTrue();
         writeLock.unlock();
         assertThat(writeLock.isLocked()).isFalse();
@@ -295,12 +286,12 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
             t1.start();
             t1.join(100);
         }
-        
+
         readWriteLock.writeLock().unlock();
-        
+
         assertThat(ref.await(1, TimeUnit.SECONDS)).isTrue();
     }
-    
+
     @Test
     public void testWriteReadReentrancy() throws InterruptedException {
         RReadWriteLock readWriteLock = redisson.getReadWriteLock("TEST");
@@ -308,7 +299,7 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
 
         java.util.concurrent.locks.Lock rLock = readWriteLock.readLock();
         Assertions.assertTrue(rLock.tryLock());
-        
+
         AtomicBoolean ref = new AtomicBoolean();
         Thread t1 = new Thread(() -> {
             boolean success = readWriteLock.readLock().tryLock();
@@ -316,9 +307,9 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
         });
         t1.start();
         t1.join();
-        
+
         Assertions.assertFalse(ref.get());
-        
+
         readWriteLock.writeLock().unlock();
         Assertions.assertFalse(readWriteLock.writeLock().tryLock());
         rLock.unlock();
@@ -326,7 +317,7 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
         Assertions.assertTrue(readWriteLock.writeLock().tryLock());
         readWriteLock.writeLock().unlock();
     }
-    
+
     @Test
     public void testWriteLock() throws InterruptedException {
         final RReadWriteLock lock = redisson.getReadWriteLock("lock");
@@ -446,6 +437,28 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
     }
 
     @Test
+    public void testReadWriteTTL() throws InterruptedException {
+        RReadWriteLock rwlock = redisson.getReadWriteLock("rwlock");
+        rwlock.writeLock().lock();
+        rwlock.readLock().lock();
+
+        for (int i = 0; i < 5; i++) {
+            assertThat(rwlock.readLock().remainTimeToLive()).isGreaterThan(19000);
+            assertThat(rwlock.writeLock().remainTimeToLive()).isGreaterThan(19000);
+            TimeUnit.SECONDS.sleep(5);
+        }
+
+        rwlock.writeLock().unlock();
+
+        for (int i = 0; i < 5; i++) {
+            assertThat(rwlock.readLock().remainTimeToLive()).isGreaterThan(19000);
+            TimeUnit.SECONDS.sleep(5);
+        }
+
+        rwlock.readLock().unlock();
+    }
+
+    @Test
     public void testExpireRead() throws InterruptedException {
         RReadWriteLock lock = redisson.getReadWriteLock("lock");
         lock.readLock().lock(2, TimeUnit.SECONDS);
@@ -486,9 +499,10 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
         t.start();
         t.join();
 
-        lock.writeLock().unlock();
+        assertThatThrownBy(() -> {
+            lock.writeLock().unlock();
+        }).isInstanceOf(IllegalMonitorStateException.class);
     }
-
 
     @Test
     public void testAutoExpire() throws InterruptedException {
@@ -747,6 +761,90 @@ public class RedissonReadWriteLockTest extends BaseConcurrentTest {
         });
 
         Assertions.assertEquals(iterations, lockedCounter.get());
+    }
+
+    @Test
+    public void testMultiInstanceReadLockZombieCleanup() throws InterruptedException {
+        // Instance A acquires read lock and then shuts down without unlocking
+        RedissonClient instanceA = createInstance();
+        try {
+            RReadWriteLock rwA = instanceA.getReadWriteLock("zombie_test");
+            rwA.readLock().lock();
+        } finally {
+            instanceA.shutdown();
+        }
+
+        RedissonClient instanceB = createInstance();
+        RReadWriteLock rwB = instanceB.getReadWriteLock("zombie_test");
+        rwB.readLock().lock();
+
+        // Wait longer than lockWatchdogTimeout so that Instance A's timeout keys expire
+        long watchdogTimeout = instanceB.getConfig().getLockWatchdogTimeout();
+        Thread.sleep(watchdogTimeout + 5000);
+
+        rwB.readLock().unlock();
+
+        // Now a write lock should succeed
+        RLock writeLock = rwB.writeLock();
+        boolean acquired = writeLock.tryLock(5, TimeUnit.SECONDS);
+        assertThat(acquired).as("Write lock should succeed after zombie reader cleanup").isTrue();
+        writeLock.unlock();
+
+        instanceB.shutdown();
+    }
+
+    //@Test
+    public void testMultiInstanceZombieReadLockPerformance() throws InterruptedException {
+        int zombieInstances = 20;
+        int locksPerZombie = 3;
+        int totalFields = zombieInstances * locksPerZombie;
+
+        List<RedissonClient> zombies = new ArrayList<>();
+        for (int i = 0; i < zombieInstances; i++) {
+            RedissonClient client = createInstance();
+            RReadWriteLock rw = client.getReadWriteLock("perf_zombie");
+            for (int j = 0; j < locksPerZombie; j++) {
+                rw.readLock().lock();
+            }
+            zombies.add(client);
+        }
+
+        // Kill all zombies without unlocking
+        for (RedissonClient client : zombies) {
+            client.shutdown();
+        }
+
+        // Living instance acquires readLock
+        RedissonClient living = createInstance();
+        RReadWriteLock rw = living.getReadWriteLock("perf_zombie");
+        rw.readLock().lock();
+
+        // Let zombie timeout keys expire naturally
+        long watchdogTimeout = living.getConfig().getLockWatchdogTimeout();
+        Thread.sleep(watchdogTimeout + 5000);
+
+        rw.readLock().unlock();
+
+        // Poll writeLock until success
+        long pollStart = System.currentTimeMillis();
+        boolean acquired = false;
+        int attempts = 0;
+        while (!acquired) {
+            attempts++;
+            acquired = rw.writeLock().tryLock(1, TimeUnit.SECONDS);
+        }
+        long pollMs = System.currentTimeMillis() - pollStart;
+
+        rw.writeLock().unlock();
+        living.shutdown();
+
+        log.info("ZombieReadLockPerformance: totalFields={}, attempts={}, pollMs={}, acquired={}",
+                 totalFields, attempts, pollMs, acquired);
+
+        assertThat(acquired).as("Write lock must eventually succeed").isTrue();
+
+        log.info("ZombieReadLockPerformance: pollMs={}ms, threshold={}ms, fixed={}",
+                 pollMs, 2000, pollMs < 2000);
     }
 
 }

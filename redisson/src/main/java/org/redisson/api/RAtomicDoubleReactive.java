@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
  */
 package org.redisson.api;
 
+import org.redisson.api.atomic.CompareAndDeleteArgs;
+import org.redisson.api.atomic.DoubleIncrementArgs;
 import reactor.core.publisher.Mono;
 
 /**
@@ -24,6 +26,15 @@ import reactor.core.publisher.Mono;
  *
  */
 public interface RAtomicDoubleReactive extends RExpirableReactive {
+
+    /**
+     * Atomically deletes the value if it satisfies the condition
+     * defined by the specified arguments.
+     *
+     * @param args compare and delete arguments
+     * @return {@code true} if deleted, {@code false} otherwise
+     */
+    Mono<Boolean> compareAndDelete(CompareAndDeleteArgs args);
 
     /**
      * Atomically sets the value to the given updated value
@@ -89,6 +100,14 @@ public interface RAtomicDoubleReactive extends RExpirableReactive {
     Mono<Double> incrementAndGet();
 
     /**
+     * Atomically increments the current value according to the specified arguments.
+     *
+     * @param args increment arguments
+     * @return the updated value
+     */
+    Mono<Double> incrementAndGet(DoubleIncrementArgs args);
+
+    /**
      * Atomically increments the current value by one.
      *
      * @return the old value
@@ -109,5 +128,25 @@ public interface RAtomicDoubleReactive extends RExpirableReactive {
      * @return void
      */
     Mono<Void> set(double newValue);
+    
+    /**
+     * Atomically sets the given value if current value is less than
+     * the special value
+     *
+     * @param less  compare value
+     * @param value newValue
+     * @return true when the value update is successful
+     */
+    Mono<Boolean> setIfLess(double less, double value);
+    
+    /**
+     * Atomically sets the given value if current value is greater than
+     * the special value
+     *
+     * @param greater  compare value
+     * @param value newValue
+     * @return true when the value update is successful
+     */
+    Mono<Boolean> setIfGreater(double greater, double value);
 
 }

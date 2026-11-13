@@ -13,6 +13,7 @@ import static org.assertj.core.api.Assertions.*;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RSetReactive;
+import reactor.test.StepVerifier;
 
 public class RedissonSetReactiveTest extends BaseReactiveTest {
 
@@ -45,6 +46,19 @@ public class RedissonSetReactiveTest extends BaseReactiveTest {
     }
 
     @Test
+    public void testEmptyCollectionResultsAsAbsent() {
+        RSetReactive<Integer> set = redisson.getSet("{simple}:empty");
+
+        set.removeRandom(1).as(StepVerifier::create).verifyComplete();
+        set.random(1).as(StepVerifier::create).verifyComplete();
+        set.readAll().as(StepVerifier::create).verifyComplete();
+        set.readUnion("{simple}:other").as(StepVerifier::create).verifyComplete();
+        set.readDiff("{simple}:other").as(StepVerifier::create).verifyComplete();
+        set.readIntersection("{simple}:other").as(StepVerifier::create).verifyComplete();
+        set.containsEach(Collections.singleton(1)).as(StepVerifier::create).verifyComplete();
+    }
+
+    @Test
     public void testRemoveRandom() {
         RSetReactive<Integer> set = redisson.getSet("simple");
         sync(set.add(1));
@@ -68,7 +82,7 @@ public class RedissonSetReactiveTest extends BaseReactiveTest {
         assertThat(sync(set.random())).isIn(1, 2, 3);
         assertThat(sync(set.random())).isIn(1, 2, 3);
 
-        assertThat(sync(set)).containsOnly(1, 2, 3);
+        assertThat(sync(set)).containsExactlyInAnyOrder(1, 2, 3);
     }
 
     @Test
@@ -101,26 +115,26 @@ public class RedissonSetReactiveTest extends BaseReactiveTest {
 
         Assertions.assertTrue(sync(set.remove(1)));
         Assertions.assertFalse(sync(set.contains(1)));
-        assertThat(sync(set)).containsExactly(3, 7);
+        assertThat(sync(set)).containsExactlyInAnyOrder(3, 7);
 
         Assertions.assertFalse(sync(set.remove(1)));
-        assertThat(sync(set)).containsExactly(3, 7);
+        assertThat(sync(set)).containsExactlyInAnyOrder(3, 7);
 
         sync(set.remove(3));
         Assertions.assertFalse(sync(set.contains(3)));
-        assertThat(sync(set)).containsExactly(7);
+        assertThat(sync(set)).containsExactlyInAnyOrder(7);
     }
 
     @Test
     public void testIteratorSequence() {
         RSetReactive<Long> set = redisson.getSet("set");
         for (int i = 0; i < 1000; i++) {
-            sync(set.add(Long.valueOf(i)));
+            sync(set.add((long) i));
         }
 
         Set<Long> setCopy = new HashSet<Long>();
         for (int i = 0; i < 1000; i++) {
-            setCopy.add(Long.valueOf(i));
+            setCopy.add((long) i);
         }
 
         checkIterator(set, setCopy);

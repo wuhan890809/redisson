@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,16 +15,16 @@
  */
 package org.redisson.rx;
 
-import java.lang.reflect.Method;
-import java.util.concurrent.Callable;
-
-import org.redisson.api.RFuture;
-import org.redisson.misc.ProxyBuilder;
-import org.redisson.misc.ProxyBuilder.Callback;
-
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Flowable;
 import io.reactivex.rxjava3.core.Single;
+import org.redisson.misc.ProxyBuilder;
+
+import java.util.Collection;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionStage;
+
 
 /**
  * 
@@ -36,27 +36,22 @@ public class RxProxyBuilder {
     public static <T> T create(CommandRxExecutor commandExecutor, Object instance, Class<T> clazz) {
         return create(commandExecutor, instance, null, clazz);
     }
-    
+
     public static <T> T create(CommandRxExecutor commandExecutor, Object instance, Object implementation, Class<T> clazz) {
-        return ProxyBuilder.create(new Callback() {
-            @Override
-            public Object execute(Method mm, Object instance, Method instanceMethod, Object[] args) {
-                Flowable<Object> flowable = commandExecutor.flowable(new Callable<RFuture<Object>>() {
-                    @Override
-                    public RFuture<Object> call() throws Exception {
-                        return (RFuture<Object>) mm.invoke(instance, args);
-                    }
-                });
-                
-                if (instanceMethod.getReturnType() == Completable.class) {
-                    return flowable.ignoreElements();
-                }
-                if (instanceMethod.getReturnType() == Single.class) {
-                    return flowable.singleOrError();
-                }
-                return flowable.singleElement();
+        return ProxyBuilder.create((callable, instanceMethod) -> {
+            Flowable<Object> flowable = commandExecutor.flowable((Callable<CompletionStage<Object>>) (Object) callable);
+
+            if (instanceMethod.getReturnType() == Completable.class) {
+                return flowable.ignoreElements();
             }
-        }, instance, implementation, clazz);
+            if (instanceMethod.getReturnType() == Single.class) {
+                return flowable.singleOrError();
+            }
+            return flowable
+                    .filter(v -> !(v instanceof Map && ((Map<?, ?>) v).isEmpty())
+                            && !(v instanceof Collection && ((Collection<?>) v).isEmpty()))
+                    .singleElement();
+        }, instance, implementation, clazz, commandExecutor.getServiceManager());
     }
     
 }

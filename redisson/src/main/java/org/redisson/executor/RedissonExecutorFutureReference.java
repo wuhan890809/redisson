@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,34 +15,33 @@
  */
 package org.redisson.executor;
 
-import java.lang.ref.ReferenceQueue;
-import java.lang.ref.WeakReference;
-
 import org.redisson.api.RExecutorFuture;
-import org.redisson.misc.RPromise;
-import org.redisson.remote.RequestId;
+
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.SoftReference;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 
  * @author Nikita Koksharov
  *
  */
-public class RedissonExecutorFutureReference extends WeakReference<RExecutorFuture<?>> {
+public class RedissonExecutorFutureReference extends SoftReference<RExecutorFuture<?>> {
 
-    private final RPromise<?> promise;
-    private final RequestId requestId;
+    private final CompletableFuture<?> promise;
+    private final String requestId;
     
-    public RedissonExecutorFutureReference(RequestId requestId, RExecutorFuture<?> referent, ReferenceQueue<? super RExecutorFuture<?>> q, RPromise<?> promise) {
+    public RedissonExecutorFutureReference(String requestId, RExecutorFuture<?> referent, ReferenceQueue<? super RExecutorFuture<?>> q, CompletableFuture<?> promise) {
         super(referent, q);
         this.requestId = requestId;
         this.promise = promise;
     }
     
-    public RPromise<?> getPromise() {
+    public CompletableFuture<?> getPromise() {
         return promise;
     }
     
-    public RequestId getRequestId() {
+    public String getRequestId() {
         return requestId;
     }
 

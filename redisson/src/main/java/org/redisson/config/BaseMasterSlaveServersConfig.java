@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
  */
 package org.redisson.config;
 
+import org.redisson.client.FailedConnectionDetector;
+import org.redisson.client.FailedNodeDetector;
 import org.redisson.connection.balancer.LoadBalancer;
 import org.redisson.connection.balancer.RoundRobinLoadBalancer;
 
@@ -27,7 +29,7 @@ import org.redisson.connection.balancer.RoundRobinLoadBalancer;
 public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig<T>> extends BaseConfig<T> {
 
     /**
-     * Сonnection load balancer for multiple Redis slave servers
+     * Connection load balancer for multiple Redis slave servers
      */
     private LoadBalancer loadBalancer = new RoundRobinLoadBalancer();
 
@@ -42,7 +44,8 @@ public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig
     private int slaveConnectionPoolSize = 64;
 
     private int failedSlaveReconnectionInterval = 3000;
-    
+
+    @Deprecated
     private int failedSlaveCheckInterval = 180000;
     
     /**
@@ -56,6 +59,10 @@ public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig
     private int masterConnectionPoolSize = 64;
 
     private ReadMode readMode = ReadMode.SLAVE;
+
+    private String clientAvailabilityZone;
+
+    private boolean fallbackLoadingToMaster = true;
     
     private SubscriptionMode subscriptionMode = SubscriptionMode.MASTER;
     
@@ -70,6 +77,10 @@ public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig
     private int subscriptionConnectionPoolSize = 50;
 
     private long dnsMonitoringInterval = 5000;
+
+    private int dnsMonitoringTimes = 1;
+
+    private FailedNodeDetector failedSlaveNodeDetector = new FailedConnectionDetector();
     
     public BaseMasterSlaveServersConfig() {
     }
@@ -84,10 +95,13 @@ public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig
         setSlaveConnectionMinimumIdleSize(config.getSlaveConnectionMinimumIdleSize());
         setSubscriptionConnectionMinimumIdleSize(config.getSubscriptionConnectionMinimumIdleSize());
         setReadMode(config.getReadMode());
+        setClientAvailabilityZone(config.getClientAvailabilityZone());
+        setFallbackLoadingToMaster(config.isFallbackLoadingToMaster());
         setSubscriptionMode(config.getSubscriptionMode());
         setDnsMonitoringInterval(config.getDnsMonitoringInterval());
-        setFailedSlaveCheckInterval(config.getFailedSlaveCheckInterval());
+        setDnsMonitoringTimes(config.getDnsMonitoringTimes());
         setFailedSlaveReconnectionInterval(config.getFailedSlaveReconnectionInterval());
+        setFailedSlaveNodeDetector(config.getFailedSlaveNodeDetector());
     }
 
     /**
@@ -109,11 +123,11 @@ public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig
     }
     
     /**
-     * Interval of Redis Slave reconnection attempt when
-     * it was excluded from internal list of available servers.
+     * When the retry interval <code>failedSlavesReconnectionTimeout<code/>
+     * reached Redisson tries to connect to failed Redis node reported by <code>failedSlaveNodeDetector</code>.
      * <p>
      * On every such timeout event Redisson tries
-     * to connect to disconnected Redis server.
+     * to connect to failed Redis server.
      * <p>
      * Default is 3000
      *
@@ -132,19 +146,19 @@ public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig
 
     
     /**
-     * Redis Slave node failing to execute commands is excluded from the internal list of available nodes
-     * when the time interval from the moment of first Redis command execution failure
-     * on this server reaches <code>slaveFailsInterval</code> value.
-     * <p>
-     * Default is <code>180000</code>
+     * Use {@link #setFailedSlaveNodeDetector(FailedNodeDetector)} instead.
      *
      * @param slaveFailsInterval - time interval in milliseconds
      * @return config
      */
+    @Deprecated
     public T setFailedSlaveCheckInterval(int slaveFailsInterval) {
+        log.error("failedSlaveCheckInterval setting is deprecated and will be removed in future releases. Use failedSlaveNodeDetector setting instead");
         this.failedSlaveCheckInterval = slaveFailsInterval;
+        this.failedSlaveNodeDetector = new FailedConnectionDetector(slaveFailsInterval);
         return (T) this;
     }
+    @Deprecated
     public int getFailedSlaveCheckInterval() {
         return failedSlaveCheckInterval;
     }
@@ -169,7 +183,7 @@ public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig
     }
 
     /**
-     * Сonnection load balancer to multiple Redis slave servers.
+     * Connection load balancer to multiple Redis slave servers.
      * Uses Round-robin algorithm by default
      *
      * @param loadBalancer object
@@ -264,6 +278,8 @@ public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig
     /**
      * Set node type used for read operation.
      * <p>
+     * The availability zone modes also need {@link #setClientAvailabilityZone(String)}.
+     * <p>
      * Default is <code>SLAVE</code>
      *
      * @param readMode param
@@ -276,8 +292,60 @@ public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig
     public ReadMode getReadMode() {
         return readMode;
     }
+
+    /**
+     * Defines the availability zone this client runs in, e.g. <code>us-east-1a</code>.
+     * Required by the availability zone read modes <code>AZ_AFFINITY</code>,
+     * <code>AZ_AFFINITY_SLAVES_AND_MASTER</code> and <code>AZ_AFFINITY_MASTER_SLAVE</code>,
+     * whether used as <code>readMode</code> or per object: they prefer nodes in this zone.
+     * Zone names are compared exactly.
+     * <p>
+     * When set, Redisson reads the zone of each node from the <code>availability_zone</code> field of
+     * <code>INFO SERVER</code> when it sets the node up: at startup, for a slave added later and for a new master
+     * after a failover, and again when a node that was taken out of use as disconnected comes back.
+     * Valkey 8.0 and later reports the node's <code>availability-zone</code> config there; managed services
+     * such as Amazon ElastiCache set it automatically. A node that reports no zone (Redis, older Valkey,
+     * the config left empty, or an <code>INFO</code> command denied by ACL) is treated as being in another zone.
+     * A zone set on a node in use takes effect at the next of these events for that node. No zone is read
+     * when <code>readMode</code> and <code>subscriptionMode</code> are both <code>MASTER</code>, as every read
+     * goes to the master then.
+     * <p>
+     * Default is <code>null</code>, which also skips reading node zones.
+     *
+     * @param clientAvailabilityZone availability zone name
+     * @return config
+     *
+     * @see ReadMode#AZ_AFFINITY
+     * @see ReadMode#AZ_AFFINITY_SLAVES_AND_MASTER
+     * @see ReadMode#AZ_AFFINITY_MASTER_SLAVE
+     */
+    public T setClientAvailabilityZone(String clientAvailabilityZone) {
+        this.clientAvailabilityZone = clientAvailabilityZone;
+        return (T) this;
+    }
+    public String getClientAvailabilityZone() {
+        return clientAvailabilityZone;
+    }
+
+    /**
+     * Defines whether a read command should be redirected to the master node
+     * if a slave node returns a LOADING error.
+     * <p>
+     * Default is <code>true</code>
+     *
+     * @param fallbackLoadingToMaster <code>true</code> to retry on master
+     * @return config
+     */
+    public T setFallbackLoadingToMaster(boolean fallbackLoadingToMaster) {
+        this.fallbackLoadingToMaster = fallbackLoadingToMaster;
+        return (T) this;
+    }
+
+    public boolean isFallbackLoadingToMaster() {
+        return fallbackLoadingToMaster;
+    }
     
-    public boolean checkSkipSlavesInit() {
+    public boolean isSlaveNotUsed() {
         return getReadMode() == ReadMode.MASTER && getSubscriptionMode() == SubscriptionMode.MASTER;
     }
 
@@ -314,5 +382,45 @@ public class BaseMasterSlaveServersConfig<T extends BaseMasterSlaveServersConfig
     public long getDnsMonitoringInterval() {
         return dnsMonitoringInterval;
     }
+
+    public int getDnsMonitoringTimes() {
+        return dnsMonitoringTimes;
+    }
     
+    /**
+     * The number of times per check the endpoint's DNS<p>
+     * Applications must ensure the JVM DNS cache TTL is low enough to support this.<p>
+     * <p>
+     * Default is <code>1</code>.
+     *
+     * @param dnsMonitoringTimes number of times
+     * @return config
+     */
+    public T setDnsMonitoringTimes(int dnsMonitoringTimes) {
+        this.dnsMonitoringTimes = dnsMonitoringTimes;
+        return (T) this;
+    }
+
+    /**
+     * Defines failed Redis Slave node detector object
+     * which implements failed node detection logic.
+     * <p>
+     * Default is <code>org.redisson.client.FailedConnectionDetector</code>
+     *
+     * @param failedNodeDetector Redis Slave node detector object
+     * @return config
+     *
+     * @see org.redisson.client.FailedConnectionDetector
+     * @see org.redisson.client.FailedCommandsDetector
+     * @see org.redisson.client.FailedCommandsTimeoutDetector
+     *
+     */
+    public T setFailedSlaveNodeDetector(FailedNodeDetector failedNodeDetector) {
+        this.failedSlaveNodeDetector = failedNodeDetector;
+        return (T) this;
+    }
+    public FailedNodeDetector getFailedSlaveNodeDetector() {
+        return failedSlaveNodeDetector;
+    }
+
 }

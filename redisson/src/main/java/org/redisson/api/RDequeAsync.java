@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,12 +37,28 @@ public interface RDequeAsync<V> extends RQueueAsync<V> {
     RFuture<Integer> addFirstIfExistsAsync(V... elements);
 
     /**
+     * Adds elements at the head of deque.
+     *
+     * @param elements - elements to add
+     * @return length of the deque
+     */
+    RFuture<Integer> addFirstAsync(V... elements);
+
+    /**
      * Adds element at the tail of existing deque.
      *
      * @param elements - elements to add
      * @return length of the list
      */
     RFuture<Integer> addLastIfExistsAsync(V... elements);
+
+    /**
+     * Adds elements at the tail of deque.
+     *
+     * @param elements - elements to add
+     * @return length of the deque
+     */
+    RFuture<Integer> addLastAsync(V... elements);
 
     /**
      * Removes last occurrence of element <code>o</code>
@@ -200,5 +216,23 @@ public interface RDequeAsync<V> extends RQueueAsync<V> {
      * @return moved element
      */
     RFuture<V> moveAsync(DequeMoveArgs args);
+
+    /**
+     * Adds object event listener
+     *
+     * @see org.redisson.api.listener.TrackingListener
+     * @see org.redisson.api.listener.ListAddListener
+     * @see org.redisson.api.listener.ListRemoveListener
+     * @see org.redisson.api.listener.ListTrimListener
+     * @see org.redisson.api.listener.ListSetListener
+     * @see org.redisson.api.listener.ListInsertListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
+     * @see org.redisson.api.listener.DequeAddFirstListener
+     *
+     * @param listener - object event listener
+     * @return listener id
+     */
+    RFuture<Integer> addListenerAsync(ObjectListener listener);
 
 }

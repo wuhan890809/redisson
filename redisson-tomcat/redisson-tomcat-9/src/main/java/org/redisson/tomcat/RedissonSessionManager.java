@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,10 +29,12 @@ import org.redisson.client.codec.Codec;
 import org.redisson.client.codec.StringCodec;
 import org.redisson.codec.CompositeCodec;
 import org.redisson.config.Config;
+import org.redisson.pubsub.PublishSubscribeService;
 
 import javax.servlet.http.HttpSession;
 import java.io.File;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.*;
 
 /**
@@ -48,14 +50,16 @@ public class RedissonSessionManager extends ManagerBase {
     
     private final Log log = LogFactory.getLog(RedissonSessionManager.class);
     
-    private RedissonClient redisson;
+    protected RedissonClient redisson;
     private String configPath;
+    private Config config;
     
     private ReadMode readMode = ReadMode.REDIS;
     private UpdateMode updateMode = UpdateMode.DEFAULT;
 
-    private String keyPrefix = "";
+    protected String keyPrefix = "";
     private boolean broadcastSessionEvents = false;
+    private boolean broadcastSessionUpdates = true;
 
     private final String nodeId = UUID.randomUUID().toString();
 
@@ -80,7 +84,15 @@ public class RedissonSessionManager extends ManagerBase {
     public void setBroadcastSessionEvents(boolean replicateSessionEvents) {
         this.broadcastSessionEvents = replicateSessionEvents;
     }
-    
+
+    public boolean isBroadcastSessionUpdates() {
+        return broadcastSessionUpdates;
+    }
+
+    public void setBroadcastSessionUpdates(boolean broadcastSessionUpdates) {
+        this.broadcastSessionUpdates = broadcastSessionUpdates;
+    }
+
     public String getReadMode() {
         return readMode.toString();
     }
@@ -95,6 +107,14 @@ public class RedissonSessionManager extends ManagerBase {
     
     public String getConfigPath() {
         return configPath;
+    }
+
+    public void setConfig(Config config) {
+        this.config = config;
+    }
+
+    public Config getConfig() {
+        return config;
     }
 
     public String getKeyPrefix() {
@@ -124,14 +144,6 @@ public class RedissonSessionManager extends ManagerBase {
         
         if (broadcastSessionEvents) {
             getTopic().publish(new SessionCreatedMessage(getNodeId(), session.getId()));
-            session.addSessionListener(new SessionListener() {
-                @Override
-                public void sessionEvent(SessionEvent event) {
-                    if (event.getType().equals(Session.SESSION_DESTROYED_EVENT)) {
-                        getTopic().publish(new SessionDestroyedMessage(getNodeId(), session.getId()));
-                    }
-                }
-            });
         }
         return session;
     }
@@ -142,15 +154,23 @@ public class RedissonSessionManager extends ManagerBase {
         return redisson.getSet(name, StringCodec.INSTANCE);
     }
     
-    public RMap<String, Object> getMap(String sessionId) {
+    public String getTomcatSessionKeyName(String sessionId) {
         String separator = keyPrefix == null || keyPrefix.isEmpty() ? "" : ":";
-        String name = keyPrefix + separator + "redisson:tomcat_session:" + sessionId;
+        return keyPrefix + separator + "redisson:tomcat_session:" + sessionId;
+    }
+
+    public RMap<String, Object> getMap(String sessionId) {
+        String name = getTomcatSessionKeyName(sessionId);
         return redisson.getMap(name, new CompositeCodec(StringCodec.INSTANCE, codecToUse, codecToUse));
     }
 
     public RTopic getTopic() {
         String separator = keyPrefix == null || keyPrefix.isEmpty() ? "" : ":";
         final String name = keyPrefix + separator + "redisson:tomcat_session_updates:" + getContext().getName();
+        PublishSubscribeService ss = ((Redisson) redisson).getCommandExecutor().getConnectionManager().getSubscribeService();
+        if (ss.isShardingSupported()) {
+            return redisson.getShardedTopic(name);
+        }
         return redisson.getTopic(name);
     }
     
@@ -160,7 +180,7 @@ public class RedissonSessionManager extends ManagerBase {
     }
     
     private Session findSession(String id, boolean notify) throws IOException {
-        Session result = super.findSession(id);
+        RedissonSession result = (RedissonSession) super.findSession(id);
         if (result == null) {
             if (id != null) {
                 Map<String, Object> attrs = new HashMap<String, Object>();
@@ -171,7 +191,7 @@ public class RedissonSessionManager extends ManagerBase {
                 }
 
                 if (attrs.isEmpty() || (broadcastSessionEvents && getNotifiedNodes(id).contains(nodeId))) {
-                    log.info("Session " + id + " can't be found");
+                    log.debug("Session " + id + " can't be found");
                     return null;    
                 }
                 
@@ -179,14 +199,14 @@ public class RedissonSessionManager extends ManagerBase {
                 session.load(attrs);
                 session.setId(id, notify);
                 
-                session.access();
+                session.superAccess();
                 session.endAccess();
                 return session;
             }
             return null;
         }
 
-        result.access();
+        result.superAccess();
         result.endAccess();
         
         return result;
@@ -194,18 +214,36 @@ public class RedissonSessionManager extends ManagerBase {
     
     @Override
     public Session createEmptySession() {
-        return new RedissonSession(this, readMode, updateMode, broadcastSessionEvents);
+        Session session = new RedissonSession(this, readMode, updateMode, broadcastSessionEvents, this.broadcastSessionUpdates);
+
+        if (broadcastSessionEvents) {
+            session.addSessionListener(event -> {
+                if (event.getType().equals(Session.SESSION_DESTROYED_EVENT)) {
+                    getTopic().publish(new SessionDestroyedMessage(getNodeId(), session.getId()));
+                }
+            });
+        }
+        return session;
     }
     
+    public void superRemove(Session session) {
+        super.remove(session, false);
+    }
+
     @Override
     public void remove(Session session, boolean update) {
         super.remove(session, update);
-        
-        if (session.getIdInternal() != null) {
+
+        if (session.getIdInternal() != null
+                && !redisson.isShuttingDown()) {
             ((RedissonSession)session).delete();
         }
     }
     
+    public void superAdd(Session session) {
+        super.add(session);
+    }
+
     @Override
     public void add(Session session) {
         super.add(session);
@@ -241,6 +279,7 @@ public class RedissonSessionManager extends ManagerBase {
         
         Pipeline pipeline = getContext().getPipeline();
         synchronized (pipeline) {
+            tryInitSsoValve();
             if (readMode == ReadMode.REDIS) {
                 Optional<Valve> res = Arrays.stream(pipeline.getValves()).filter(v -> v.getClass() == UsageValve.class).findAny();
                 if (res.isPresent()) {
@@ -259,66 +298,61 @@ public class RedissonSessionManager extends ManagerBase {
             }
         }
         
-        if (readMode == ReadMode.MEMORY || broadcastSessionEvents) {
+        if (readMode == ReadMode.MEMORY && this.broadcastSessionUpdates || broadcastSessionEvents) {
             RTopic updatesTopic = getTopic();
-            messageListener = new MessageListener<AttributeMessage>() {
-                
-                @Override
-                public void onMessage(CharSequence channel, AttributeMessage msg) {
-                    try {
-                        if (msg.getNodeId().equals(nodeId)) {
-                            return;
-                        }
-
-                        RedissonSession session = (RedissonSession) RedissonSessionManager.super.findSession(msg.getSessionId());
-                        if (session != null) {
-                            if (msg instanceof SessionDestroyedMessage) {
-                                session.expire();
-                            }
-                            
-                            if (msg instanceof AttributeRemoveMessage) {
-                                for (String name : ((AttributeRemoveMessage)msg).getNames()) {
-                                    session.superRemoveAttributeInternal(name, true);
-                                }
-                            }
-
-                            if (msg instanceof AttributesClearMessage) {
-                                RedissonSessionManager.super.remove(session, false);
-                            }
-                            
-                            if (msg instanceof AttributesPutAllMessage) {
-                                AttributesPutAllMessage m = (AttributesPutAllMessage) msg;
-                                Map<String, Object> attrs = m.getAttrs(codecToUse.getMapValueDecoder());
-                                session.load(attrs);
-                            }
-                            
-                            if (msg instanceof AttributeUpdateMessage) {
-                                AttributeUpdateMessage m = (AttributeUpdateMessage)msg;
-                                session.superSetAttribute(m.getName(), m.getValue(codecToUse.getMapValueDecoder()), true);
-                            }
-                        } else {
-                            if (msg instanceof SessionCreatedMessage) {
-                                Session s = findSession(msg.getSessionId());
-                                if (s == null) {
-                                    throw new IllegalStateException("Unable to find session: " + msg.getSessionId());
-                                }
-                            }
-                            
-                            if (msg instanceof SessionDestroyedMessage) {
-                                Session s = findSession(msg.getSessionId(), false);
-                                if (s == null) {
-                                    throw new IllegalStateException("Unable to find session: " + msg.getSessionId());
-                                }
-                                s.expire();
-                                RSet<String> set = getNotifiedNodes(msg.getSessionId());
-                                set.add(nodeId);
-                            }
-                            
-                        }
-
-                    } catch (Exception e) {
-                        log.error("Unable to handle topic message", e);
+            messageListener = (MessageListener<AttributeMessage>) (channel, msg) -> {
+                try {
+                    if (msg.getNodeId().equals(nodeId)) {
+                        return;
                     }
+
+                    RedissonSession session = (RedissonSession) RedissonSessionManager.super.findSession(msg.getSessionId());
+                    if (session != null) {
+                        if (msg instanceof SessionDestroyedMessage) {
+                            session.expire();
+                        }
+
+                        if (msg instanceof AttributeRemoveMessage) {
+                            for (String name : ((AttributeRemoveMessage)msg).getNames()) {
+                                session.superRemoveAttributeInternal(name, true);
+                            }
+                        }
+
+                        if (msg instanceof AttributesClearMessage) {
+                            RedissonSessionManager.super.remove(session, false);
+                        }
+
+                        if (msg instanceof AttributesPutAllMessage) {
+                            AttributesPutAllMessage m = (AttributesPutAllMessage) msg;
+                            Map<String, Object> attrs = m.getAttrs(codecToUse.getMapValueDecoder());
+                            session.load(attrs);
+                        }
+
+                        if (msg instanceof AttributeUpdateMessage) {
+                            AttributeUpdateMessage m = (AttributeUpdateMessage)msg;
+                            Map<String, Object> attrs = new HashMap<>();
+                            attrs.put(m.getName(), m.getValue(codecToUse.getMapValueDecoder()));
+                            session.load(attrs);
+                        }
+                    } else {
+                        if (msg instanceof SessionCreatedMessage) {
+                            findSession(msg.getSessionId());
+                        }
+
+                        if (msg instanceof SessionDestroyedMessage) {
+                            Session s = findSession(msg.getSessionId(), false);
+                            if (s != null) {
+                                s.expire();
+                            }
+                            RSet<String> set = getNotifiedNodes(msg.getSessionId());
+                            set.add(nodeId);
+                            set.expire(Duration.ofSeconds(60));
+                        }
+
+                    }
+
+                } catch (Exception e) {
+                    log.error("Unable to handle topic message", e);
                 }
             };
             
@@ -329,19 +363,18 @@ public class RedissonSessionManager extends ManagerBase {
     }
 
     protected RedissonClient buildClient() throws LifecycleException {
-        Config config = null;
-        try {
-            config = Config.fromYAML(new File(configPath), getClass().getClassLoader());
-        } catch (IOException e) {
-            // trying next format
+        if (config == null) {
+            if (configPath == null) {
+                throw new LifecycleException(
+                        "Either a Config object (via setConfig) or a configPath must be provided");
+            }
             try {
-                config = Config.fromJSON(new File(configPath), getClass().getClassLoader());
-            } catch (IOException e1) {
-                log.error("Can't parse json config " + configPath, e);
-                throw new LifecycleException("Can't parse yaml config " + configPath, e1);
+                config = Config.fromYAML(new File(configPath), getClass().getClassLoader());
+            } catch (Exception e) {
+                throw new LifecycleException("Can't parse yaml config " + configPath, e);
             }
         }
-        
+
         try {
             return Redisson.create(config);
         } catch (Exception e) {
@@ -401,10 +434,31 @@ public class RedissonSessionManager extends ManagerBase {
         
         RedissonSession sess = (RedissonSession) super.findSession(session.getId());
         if (sess != null) {
-            sess.access();
-            sess.endAccess();
+            sess.superAccess();
+            sess.superEndAccess();
             sess.save();
         }
     }
-    
+
+    private void tryInitSsoValve() {
+        Container c = getContext();
+        // SSO valve has to be in defined in Host
+        // it won't be picked up by Catalina from within Context
+        while (c != null && !(c instanceof org.apache.catalina.Host)) {
+            c = c.getParent();
+        }
+        if (c == null) {
+            log.warn("No Catalina Host found for current context. Can't configure Redisson SSO.");
+            return;
+        }
+        for (Valve valve : ((Host) c).getPipeline().getValves()) {
+            if (valve instanceof RedissonSingleSignOn) {
+                log.debug("Found SSO valve, passing RedissionSessionManager to it.");
+                ((RedissonSingleSignOn) valve).setSessionManager(this);
+                return;
+            }
+        }
+        log.trace("No Redisson SSO valve found. Redisson SSO is not configured.");
+    }
+
 }

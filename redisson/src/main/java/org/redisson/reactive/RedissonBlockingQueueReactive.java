@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,13 +15,11 @@
  */
 package org.redisson.reactive;
 
-import java.util.concurrent.Callable;
-
+import org.redisson.BaseRedissonList;
 import org.redisson.api.RBlockingQueue;
 import org.redisson.api.RFuture;
-import org.redisson.api.RListAsync;
-
 import reactor.core.publisher.Flux;
+
 
 /**
  * 
@@ -34,17 +32,21 @@ public class RedissonBlockingQueueReactive<V> extends RedissonListReactive<V> {
     private final RBlockingQueue<V> queue;
     
     public RedissonBlockingQueueReactive(RBlockingQueue<V> queue) {
-        super((RListAsync<V>) queue);
+        super(null);
         this.queue = queue;
     }
 
     public Flux<V> takeElements() {
-        return ElementsStream.takeElements(new Callable<RFuture<V>>() {
-            @Override
-            public RFuture<V> call() throws Exception {
-                return queue.takeAsync();
-            }
-        });
+        return ElementsStream.takeElements(() -> queue.takeAsync());
     }
-    
+
+    @Override
+    RFuture<V> getAsync(int currentIndex) {
+        return ((BaseRedissonList) queue).getAsync(currentIndex);
+    }
+
+    @Override
+    RFuture<Boolean> addAsync(V o) {
+        return ((BaseRedissonList) queue).addAsync(o);
+    }
 }

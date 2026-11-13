@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import java.util.List;
  * @author Nikita Koksharov
  *
  */
-public class BatchResult<E> {
+public final class BatchResult<E> {
 
     private final List<E> responses;
     private final int syncedSlaves;

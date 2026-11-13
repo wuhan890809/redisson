@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,33 +15,30 @@
  */
 package org.redisson;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Set;
-import java.util.stream.Stream;
-
-import org.redisson.api.RCountDownLatch;
-import org.redisson.api.RFuture;
-import org.redisson.api.RLock;
-import org.redisson.api.RPermitExpirableSemaphore;
-import org.redisson.api.RReadWriteLock;
-import org.redisson.api.RSemaphore;
-import org.redisson.api.RSet;
-import org.redisson.api.RedissonClient;
-import org.redisson.api.SortOrder;
+import org.redisson.api.*;
+import org.redisson.api.listener.SetAddListener;
+import org.redisson.api.listener.SetDiffStoreListener;
+import org.redisson.api.listener.SetInterStoreListener;
+import org.redisson.api.listener.SetRemoveListener;
+import org.redisson.api.listener.SetRemoveRandomListener;
+import org.redisson.api.listener.SetUnionStoreListener;
+import org.redisson.api.listener.TrackingListener;
 import org.redisson.api.mapreduce.RCollectionMapReduce;
 import org.redisson.client.RedisClient;
 import org.redisson.client.codec.Codec;
+import org.redisson.client.codec.LongCodec;
+import org.redisson.client.protocol.RedisCommand;
 import org.redisson.client.protocol.RedisCommands;
-import org.redisson.client.protocol.decoder.ListScanResult;
+import org.redisson.client.protocol.decoder.ContainsSetDecoder;
 import org.redisson.command.CommandAsyncExecutor;
+import org.redisson.iterator.BaseAsyncIterator;
 import org.redisson.iterator.RedissonBaseIterator;
 import org.redisson.mapreduce.RedissonCollectionMapReduce;
-import org.redisson.misc.RedissonPromise;
+import org.redisson.misc.CompletableFutureWrapper;
+import org.redisson.misc.CompositeAsyncIterator;
+
+import java.util.*;
+import java.util.stream.Stream;
 
 /**
  * Distributed and concurrent implementation of {@link java.util.Set}
@@ -96,7 +93,7 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
     }
 
     @Override
-    public ListScanResult<Object> scanIterator(String name, RedisClient client, long startPos, String pattern, int count) {
+    public ScanResult<Object> scanIterator(String name, RedisClient client, String startPos, String pattern, int count) {
         return get(scanIteratorAsync(name, client, startPos, pattern, count));
     }
 
@@ -111,11 +108,11 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
     }
     
     @Override
-    public Iterator<V> iterator(final String pattern, final int count) {
+    public Iterator<V> iterator(String pattern, int count) {
         return new RedissonBaseIterator<V>() {
 
             @Override
-            protected ListScanResult<Object> iterator(RedisClient client, long nextIterPos) {
+            protected ScanResult<Object> iterator(RedisClient client, String nextIterPos) {
                 return scanIterator(getRawName(), client, nextIterPos, pattern, count);
             }
 
@@ -126,7 +123,90 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
             
         };
     }
-    
+
+    @Override
+    public AsyncIterator<V> iteratorAsync() {
+        return iteratorAsync(10);
+    }
+
+    @Override
+    public AsyncIterator<V> iteratorAsync(int count) {
+        AsyncIterator<V> asyncIterator = new BaseAsyncIterator<V, Object>() {
+
+            @Override
+            protected RFuture<ScanResult<Object>> iterator(RedisClient client, String nextItPos) {
+                return scanIteratorAsync(name, client, nextItPos, null, count);
+            }
+
+        };
+        return new CompositeAsyncIterator<>(Arrays.asList(asyncIterator), 0);
+    }
+
+    @Override
+    public Iterator<V> distributedIterator(final String pattern) {
+        String iteratorName = "__redisson_set_cursor_{" + getRawName() + "}";
+        return distributedIterator(iteratorName, pattern, 10);
+    }
+
+    @Override
+    public Iterator<V> distributedIterator(final int count) {
+        String iteratorName = "__redisson_set_cursor_{" + getRawName() + "}";
+        return distributedIterator(iteratorName, null, count);
+    }
+
+    @Override
+    public Iterator<V> distributedIterator(final String iteratorName, final String pattern, final int count) {
+        return new RedissonBaseIterator<V>() {
+
+            @Override
+            protected ScanResult<Object> iterator(RedisClient client, String nextIterPos) {
+                return distributedScanIterator(iteratorName, pattern, count);
+            }
+
+            @Override
+            protected void remove(Object value) {
+                RedissonSet.this.remove((V) value);
+            }
+        };
+    }
+
+    private ScanResult<Object> distributedScanIterator(String iteratorName, String pattern, int count) {
+        return get(distributedScanIteratorAsync(iteratorName, pattern, count));
+    }
+
+    private RFuture<ScanResult<Object>> distributedScanIteratorAsync(String iteratorName, String pattern, int count) {
+        List<Object> args = new ArrayList<>(2);
+        if (pattern != null) {
+            args.add(pattern);
+        }
+        args.add(count);
+
+        return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_SCAN,
+                "local cursor = redis.call('get', KEYS[2]); "
+                + "if cursor ~= false then "
+                    + "cursor = tonumber(cursor); "
+                + "else "
+                    + "cursor = 0;"
+                + "end;"
+                + "if cursor == -1 then "
+                    + "return {'0', {}}; "
+                + "end;"
+                + "local result; "
+                + "if (#ARGV == 2) then "
+                    + "result = redis.call('sscan', KEYS[1], cursor, 'match', ARGV[1], 'count', ARGV[2]); "
+                + "else "
+                    + "result = redis.call('sscan', KEYS[1], cursor, 'count', ARGV[1]); "
+                + "end;"
+                + "local next_cursor = result[1]"
+                + "if next_cursor ~= \"0\" then "
+                    + "redis.call('setex', KEYS[2], 3600, next_cursor);"
+                + "else "
+                    + "redis.call('setex', KEYS[2], 3600, -1);"
+                + "end; "
+                + "return result;",
+                Arrays.<Object>asList(getRawName(), iteratorName), args.toArray());
+    }
+
     @Override
     public Iterator<V> iterator() {
         return iterator(null);
@@ -192,7 +272,7 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
 
     @Override
     public RFuture<V> randomAsync() {
-        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SRANDMEMBER_SINGLE, getRawName());
+        return commandExecutor.readAsync(getRawName(), codec, RedisCommands.SRANDMEMBER_SINGLE, getRawName());
     }
 
     @Override
@@ -202,7 +282,7 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
 
     @Override
     public RFuture<Set<V>> randomAsync(int count) {
-        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SRANDMEMBER, getRawName(), count);
+        return commandExecutor.readAsync(getRawName(), codec, RedisCommands.SRANDMEMBER, getRawName(), count);
     }
 
     @Override
@@ -235,14 +315,17 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
     @Override
     public RFuture<Boolean> containsAllAsync(Collection<?> c) {
         if (c.isEmpty()) {
-            return RedissonPromise.newSucceededFuture(true);
+            return new CompletableFutureWrapper<>(true);
         }
         
         String tempName = suffixName(getRawName(), "redisson_temp");
         
         return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_BOOLEAN,
-                        "redis.call('sadd', KEYS[2], unpack(ARGV)); "
-                        + "local size = redis.call('sdiff', KEYS[2], KEYS[1]);"
+                    "for i=1, #ARGV, 5000 do " +
+                              "redis.call('sadd', KEYS[2], unpack(ARGV, i, math.min(i+4999, #ARGV))); " +
+                          "end; " +
+
+                          "local size = redis.call('sdiff', KEYS[2], KEYS[1]);"
                         + "redis.call('del', KEYS[2]); "
                         + "return #size == 0 and 1 or 0; ",
                        Arrays.<Object>asList(getRawName(), tempName), encode(c).toArray());
@@ -256,13 +339,30 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
     @Override
     public RFuture<Boolean> addAllAsync(Collection<? extends V> c) {
         if (c.isEmpty()) {
-            return RedissonPromise.newSucceededFuture(false);
+            return new CompletableFutureWrapper<>(false);
         }
         
         List<Object> args = new ArrayList<Object>(c.size() + 1);
         args.add(getRawName());
         encode(args, c);
         return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SADD_BOOL, args.toArray());
+    }
+
+    @Override
+    public RFuture<Integer> addAllCountedAsync(Collection<? extends V> c) {
+        if (c.isEmpty()) {
+            return new CompletableFutureWrapper<>(0);
+        }
+
+        List<Object> args = new ArrayList<>(c.size() + 1);
+        args.add(getRawName());
+        encode(args, c);
+        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SADD, args.toArray());
+    }
+
+    @Override
+    public int addAllCounted(Collection<? extends V> c) {
+        return get(addAllCountedAsync(c));
     }
 
     @Override
@@ -279,8 +379,11 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
         String tempName = suffixName(getRawName(), "redisson_temp");
         
         return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_BOOLEAN,
-               "redis.call('sadd', KEYS[2], unpack(ARGV)); "
-                + "local prevSize = redis.call('scard', KEYS[1]); "
+            "for i=1, #ARGV, 5000 do " +
+                      "redis.call('sadd', KEYS[2], unpack(ARGV, i, math.min(i+4999, #ARGV))); " +
+                  "end; " +
+
+                  "local prevSize = redis.call('scard', KEYS[1]); "
                 + "local size = redis.call('sinterstore', KEYS[1], KEYS[1], KEYS[2]);"
                 + "redis.call('del', KEYS[2]); "
                 + "return size ~= prevSize and 1 or 0; ",
@@ -291,7 +394,7 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
     @Override
     public RFuture<Boolean> removeAllAsync(Collection<?> c) {
         if (c.isEmpty()) {
-            return RedissonPromise.newSucceededFuture(false);
+            return new CompletableFutureWrapper<>(false);
         }
         
         List<Object> args = new ArrayList<Object>(c.size() + 1);
@@ -299,6 +402,38 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
         encode(args, c);
         
         return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SREM_SINGLE, args.toArray());
+    }
+
+    @Override
+    public int removeAllCounted(Collection<? extends V> c) {
+        return get(removeAllCountedAsync(c));
+    }
+
+    @Override
+    public RFuture<Integer> removeAllCountedAsync(Collection<? extends V> c) {
+        if (c.isEmpty()) {
+            return new CompletableFutureWrapper<>(0);
+        }
+
+        List<Object> args = new ArrayList<>(c.size() + 1);
+        args.add(getRawName());
+        encode(args, c);
+
+        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SREM, args.toArray());
+    }
+
+    @Override
+    public RFuture<Set<V>> containsEachAsync(Collection<V> c) {
+        if (c.isEmpty()) {
+            return new CompletableFutureWrapper<>(Collections.<V>emptySet());
+        }
+
+        List<Object> args = new ArrayList<>(c.size() + 1);
+        args.add(getRawName());
+        encode(args, c);
+
+        return commandExecutor.readAsync(getRawName(), LongCodec.INSTANCE,
+                new RedisCommand<>("SMISMEMBER", new ContainsSetDecoder<>(c)), args.toArray());
     }
 
     @Override
@@ -313,9 +448,9 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
 
     @Override
     public RFuture<Integer> unionAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
+        List<Object> args = new ArrayList<>(names.length + 1);
         args.add(getRawName());
-        args.addAll(Arrays.asList(names));
+        args.addAll(map(names));
         return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SUNIONSTORE_INT, args.toArray());
     }
 
@@ -326,10 +461,10 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
 
     @Override
     public RFuture<Set<V>> readUnionAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
+        List<Object> args = new ArrayList<>(names.length + 1);
         args.add(getRawName());
-        args.addAll(Arrays.asList(names));
-        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SUNION, args.toArray());
+        args.addAll(map(names));
+        return commandExecutor.readAsync(getRawName(), codec, RedisCommands.SUNION, args.toArray());
     }
 
     @Override
@@ -339,9 +474,9 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
 
     @Override
     public RFuture<Integer> diffAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
+        List<Object> args = new ArrayList<>(names.length + 1);
         args.add(getRawName());
-        args.addAll(Arrays.asList(names));
+        args.addAll(map(names));
         return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SDIFFSTORE_INT, args.toArray());
     }
 
@@ -352,10 +487,10 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
 
     @Override
     public RFuture<Set<V>> readDiffAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
+        List<Object> args = new ArrayList<>(names.length + 1);
         args.add(getRawName());
-        args.addAll(Arrays.asList(names));
-        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SDIFF, args.toArray());
+        args.addAll(map(names));
+        return commandExecutor.readAsync(getRawName(), codec, RedisCommands.SDIFF, args.toArray());
     }
 
     @Override
@@ -365,9 +500,9 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
 
     @Override
     public RFuture<Integer> intersectionAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
+        List<Object> args = new ArrayList<>(names.length + 1);
         args.add(getRawName());
-        args.addAll(Arrays.asList(names));
+        args.addAll(map(names));
         return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SINTERSTORE_INT, args.toArray());
     }
 
@@ -378,12 +513,123 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
 
     @Override
     public RFuture<Set<V>> readIntersectionAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
+        List<Object> args = new ArrayList<>(names.length + 1);
         args.add(getRawName());
-        args.addAll(Arrays.asList(names));
-        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SINTER, args.toArray());
+        args.addAll(map(names));
+        return commandExecutor.readAsync(getRawName(), codec, RedisCommands.SINTER, args.toArray());
     }
     
+    @Override
+    public Integer countIntersection(String... names) {
+        return get(countIntersectionAsync(names));
+    }
+
+    @Override
+    public RFuture<Integer> countIntersectionAsync(String... names) {
+        return countIntersectionAsync(0, names);
+    }
+
+    @Override
+    public Integer countIntersection(int limit, String... names) {
+        return get(countIntersectionAsync(limit, names));
+    }
+
+    @Override
+    public RFuture<Integer> countIntersectionAsync(int limit, String... names) {
+        List<Object> args = new ArrayList<>(names.length + 1);
+        args.add(names.length + 1);
+        args.add(getRawName());
+        args.addAll(map(names));
+        if (limit > 0) {
+            args.add("LIMIT");
+            args.add(limit);
+        }
+        return commandExecutor.writeAsync(getRawName(), codec, RedisCommands.SINTERCARD_INT, args.toArray());
+    }
+
+    @Override
+    public Integer countUnion(String... names) {
+        return get(countUnionAsync(names));
+    }
+
+    @Override
+    public RFuture<Integer> countUnionAsync(String... names) {
+        return countUnionAsync(0, names);
+    }
+
+    @Override
+    public Integer countUnion(int limit, String... names) {
+        return get(countUnionAsync(limit, names));
+    }
+
+    @Override
+    public RFuture<Integer> countUnionAsync(int limit, String... names) {
+        return unionCardAsync(false, limit, names);
+    }
+
+    @Override
+    public Integer countUnionApprox(String... names) {
+        return get(countUnionApproxAsync(names));
+    }
+
+    @Override
+    public RFuture<Integer> countUnionApproxAsync(String... names) {
+        return countUnionApproxAsync(0, names);
+    }
+
+    @Override
+    public Integer countUnionApprox(int limit, String... names) {
+        return get(countUnionApproxAsync(limit, names));
+    }
+
+    @Override
+    public RFuture<Integer> countUnionApproxAsync(int limit, String... names) {
+        return unionCardAsync(true, limit, names);
+    }
+
+    private RFuture<Integer> unionCardAsync(boolean approx, int limit, String... names) {
+        List<Object> args = new ArrayList<>(names.length + 5);
+        args.add(names.length + 1);
+        args.add(getRawName());
+        args.addAll(map(names));
+        if (approx) {
+            args.add("APPROX");
+        }
+        if (limit > 0) {
+            args.add("LIMIT");
+            args.add(limit);
+        }
+        return commandExecutor.readAsync(getRawName(), codec, RedisCommands.SUNIONCARD_INT, args.toArray());
+    }
+
+    @Override
+    public Integer countDiff(String... names) {
+        return get(countDiffAsync(names));
+    }
+
+    @Override
+    public RFuture<Integer> countDiffAsync(String... names) {
+        return countDiffAsync(0, names);
+    }
+
+    @Override
+    public Integer countDiff(int limit, String... names) {
+        return get(countDiffAsync(limit, names));
+    }
+
+    @Override
+    public RFuture<Integer> countDiffAsync(int limit, String... names) {
+        List<Object> args = new ArrayList<>(names.length + 4);
+        args.add(names.length + 1);
+        args.add(getRawName());
+        args.addAll(map(names));
+        if (limit > 0) {
+            args.add("LIMIT");
+            args.add(limit);
+        }
+        return commandExecutor.readAsync(getRawName(), codec, RedisCommands.SDIFFCARD_INT, args.toArray());
+    }
+
     @Override
     public void clear() {
         delete();
@@ -616,6 +862,11 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
     }
 
     @Override
+    public Set<V> containsEach(Collection<V> c) {
+        return get(containsEachAsync(c));
+    }
+
+    @Override
     public RFuture<Boolean> tryAddAsync(V... values) {
         return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_BOOLEAN,
                   "for i, v in ipairs(ARGV) do " +
@@ -628,7 +879,7 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
                             "redis.call('sadd', KEYS[1], unpack(ARGV, i, math.min(i+4999, #ARGV))); " +
                         "end; " +
                         "return 1; ",
-                       Arrays.asList(getRawName()), encode(values).toArray());
+                Arrays.asList(getRawName()), encode(Arrays.asList(values)).toArray());
     }
 
     @Override
@@ -668,7 +919,7 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
     }
 
     @Override
-    public RFuture<ListScanResult<Object>> scanIteratorAsync(String name, RedisClient client, long startPos,
+    public RFuture<ScanResult<Object>> scanIteratorAsync(String name, RedisClient client, String startPos,
             String pattern, int count) {
         if (pattern == null) {
             return commandExecutor.readAsync(client, name, codec, RedisCommands.SSCAN, name, startPos, "COUNT", count);
@@ -723,4 +974,73 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V>, ScanIt
     public Stream<V> stream(String pattern) {
         return toStream(iterator(pattern));
     }
+
+    @Override
+    public int addListener(ObjectListener listener) {
+        if (listener instanceof SetAddListener) {
+            return addListener("__keyevent@*:sadd", (SetAddListener) listener, SetAddListener::onAdd);
+        }
+        if (listener instanceof SetRemoveListener) {
+            return addListener("__keyevent@*:srem", (SetRemoveListener) listener, SetRemoveListener::onRemove);
+        }
+        if (listener instanceof SetRemoveRandomListener) {
+            return addListener("__keyevent@*:spop", (SetRemoveRandomListener) listener, SetRemoveRandomListener::onRandomRemove);
+        }
+        if (listener instanceof SetInterStoreListener) {
+            return addListener("__keyevent@*:sinterstore", (SetInterStoreListener) listener, SetInterStoreListener::onStore);
+        }
+        if (listener instanceof SetUnionStoreListener) {
+            return addListener("__keyevent@*:sunionstore", (SetUnionStoreListener) listener, SetUnionStoreListener::onStore);
+        }
+        if (listener instanceof SetDiffStoreListener) {
+            return addListener("__keyevent@*:sdiffstore", (SetDiffStoreListener) listener, SetDiffStoreListener::onStore);
+        }
+        if (listener instanceof TrackingListener) {
+            return addTrackingListener((TrackingListener) listener);
+        }
+
+        return super.addListener(listener);
+    }
+
+    @Override
+    public RFuture<Integer> addListenerAsync(ObjectListener listener) {
+        if (listener instanceof SetAddListener) {
+            return addListenerAsync("__keyevent@*:sadd", (SetAddListener) listener, SetAddListener::onAdd);
+        }
+        if (listener instanceof SetRemoveListener) {
+            return addListenerAsync("__keyevent@*:srem", (SetRemoveListener) listener, SetRemoveListener::onRemove);
+        }
+        if (listener instanceof SetRemoveRandomListener) {
+            return addListenerAsync("__keyevent@*:spop", (SetRemoveRandomListener) listener, SetRemoveRandomListener::onRandomRemove);
+        }
+        if (listener instanceof SetInterStoreListener) {
+            return addListenerAsync("__keyevent@*:sinterstore", (SetInterStoreListener) listener, SetInterStoreListener::onStore);
+        }
+        if (listener instanceof SetUnionStoreListener) {
+            return addListenerAsync("__keyevent@*:sunionstore", (SetUnionStoreListener) listener, SetUnionStoreListener::onStore);
+        }
+        if (listener instanceof SetDiffStoreListener) {
+            return addListenerAsync("__keyevent@*:sdiffstore", (SetDiffStoreListener) listener, SetDiffStoreListener::onStore);
+        }
+        if (listener instanceof TrackingListener) {
+            return addTrackingListenerAsync((TrackingListener) listener);
+        }
+
+        return super.addListenerAsync(listener);
+    }
+
+    @Override
+    public void removeListener(int listenerId) {
+        removeTrackingListener(listenerId);
+        removeListener(listenerId, "__keyevent@*:sadd", "__keyevent@*:srem", "__keyevent@*:spop", "__keyevent@*:sinterstore", "__keyevent@*:sunionstore", "__keyevent@*:sdiffstore");
+        super.removeListener(listenerId);
+    }
+
+    @Override
+    public RFuture<Void> removeListenerAsync(int listenerId) {
+        return removeListenerAsync(removeTrackingListenerAsync(listenerId), listenerId,
+                "__keyevent@*:sadd", "__keyevent@*:srem", "__keyevent@*:spop", "__keyevent@*:sinterstore", "__keyevent@*:sunionstore", "__keyevent@*:sdiffstore");
+    }
+
+
 }

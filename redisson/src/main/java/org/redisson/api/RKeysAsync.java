@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,6 +14,12 @@
  * limitations under the License.
  */
 package org.redisson.api;
+
+import java.time.Duration;
+import java.time.Instant;
+import org.redisson.api.options.KeysScanOptions;
+import org.redisson.api.keys.MigrateArgs;
+import org.redisson.client.protocol.Time;
 
 import java.util.concurrent.TimeUnit;
 
@@ -35,6 +41,7 @@ public interface RKeysAsync {
     
     /**
      * Transfer object from source Redis instance to destination Redis instance
+     * @deprecated use {@link #migrateAsync(MigrateArgs)}  instead
      *
      * @param name of object
      * @param host - destination host
@@ -44,10 +51,19 @@ public interface RKeysAsync {
      * @return void 
      */
     RFuture<Void> migrateAsync(String name, String host, int port, int database, long timeout);
-    
+
+    /**
+     * Transfer object from source Redis instance to destination Redis instance
+     *
+     * @param migrateArgs migrateArgs
+     */
+    RFuture<Void> migrateAsync(MigrateArgs migrateArgs);
+
     /**
      * Copy object from source Redis instance to destination Redis instance
      * in async mode
+     *
+     * @deprecated use {@link #migrateAsync(MigrateArgs)}  instead
      *
      * @param name of object
      * @param host - destination host
@@ -56,29 +72,49 @@ public interface RKeysAsync {
      * @param timeout - maximum idle time in any moment of the communication with the destination instance in milliseconds
      * @return void
      */
+    @Deprecated
     RFuture<Void> copyAsync(String name, String host, int port, int database, long timeout);
     
     /**
-     * Set a timeout for object. After the timeout has expired,
-     * the key will automatically be deleted.
+     * Use {@link #expireAsync(Duration, String...)} instead.
      *
      * @param name of object
      * @param timeToLive - timeout before object will be deleted
      * @param timeUnit - timeout time unit
      * @return <code>true</code> if the timeout was set and <code>false</code> if not
      */
+    @Deprecated
     RFuture<Boolean> expireAsync(String name, long timeToLive, TimeUnit timeUnit);
-    
+
     /**
-     * Set an expire date for object. When expire date comes
-     * the key will automatically be deleted.
+     * Set a timeout for multiple objects. After the timeout has expired,
+     * the keys will automatically be deleted.
+     *
+     * @param duration timeout before keys will be deleted
+     * @param names object names
+     * @return number of keys for which the timeout was set successfully
+     */
+    RFuture<Long> expireAsync(Duration duration, String... names);
+
+    /**
+     * Use {@link #expireAtAsync(Instant, String...)} instead.
      * 
      * @param name of object
      * @param timestamp - expire date in milliseconds (Unix timestamp)
      * @return <code>true</code> if the timeout was set and <code>false</code> if not
      */
+    @Deprecated
     RFuture<Boolean> expireAtAsync(String name, long timestamp);
-    
+
+    /**
+     * Set a timeout for multiple objects. After the timeout has expired,
+     * the keys will automatically be deleted.
+     *
+     * @param instant expiration date/time (Unix timestamp in milliseconds)
+     * @param names object names
+     * @return number of keys for which the timeout was set successfully
+     */
+    RFuture<Long> expireAtAsync(Instant instant, String... names);
     /**
      * Clear an expire timeout or expire date for object.
      *
@@ -132,7 +168,118 @@ public interface RKeysAsync {
      * @return amount of existing keys
      */
     RFuture<Long> countExistsAsync(String... names);
-    
+
+    /**
+     * Protects a key from eviction: under {@code maxmemory} it is never
+     * chosen for eviction, whatever the eviction policy.
+     * <p>
+     * The protection belongs to the key, not to its value. It survives
+     * overwriting the value, {@code RENAME}, {@code COPY}, {@code MOVE} and
+     * a restart from RDB or AOF. It is lost when the key is deleted or expires,
+     * even if the key is written again, and {@code DUMP}/{@code RESTORE}
+     * doesn't carry it. It doesn't protect the key from expiration or deletion.
+     * Removing the last element of a collection deletes its key, and the
+     * protection with it.
+     * <p>
+     * Only the named key is protected. Some Redisson objects keep auxiliary keys
+     * beside their data, such as the configuration of a Bloom filter;
+     * {@link RObject#bless()} protects all of them.
+     * <p>
+     * When protected keys hold the memory eviction needs, used memory may grow
+     * up to 1.25 times {@code maxmemory} before writes are rejected with OOM.
+     * This method is rejected then too, unlike {@link #unblessAsync(String)},
+     * so memory can always be released.
+     * <p>
+     * Uses {@code BLESS SET name NO-EVICT} command.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param name name of key
+     * @return {@code true} if the key was protected by this call,
+     *         {@code false} if it already was.
+     *         Fails with {@link org.redisson.client.RedisException}
+     *         if the key doesn't exist
+     */
+    RFuture<Boolean> blessAsync(String name);
+
+    /**
+     * Removes the protection from eviction set by {@link #blessAsync(String)}.
+     * <p>
+     * Allowed when memory is full, so the memory that protected keys hold
+     * can always be released.
+     * <p>
+     * Uses {@code BLESS CLEAR name NO-EVICT} command.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param name name of key
+     * @return {@code true} if the protection was removed,
+     *         {@code false} if the key wasn't protected.
+     *         Fails with {@link org.redisson.client.RedisException}
+     *         if the key doesn't exist
+     */
+    RFuture<Boolean> unblessAsync(String name);
+
+    /**
+     * Checks if a key is protected from eviction by {@link #blessAsync(String)}.
+     * <p>
+     * Uses {@code BLESS GET} command.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param name name of key
+     * @return {@code true} if the key is protected.
+     *         Fails with {@link org.redisson.client.RedisException}
+     *         if the key doesn't exist
+     */
+    RFuture<Boolean> isBlessedAsync(String name);
+
+    /**
+     * Returns the keys of the current database protected from eviction by
+     * {@link #blessAsync(String)}, on all master nodes. Keys are traversed with
+     * {@code BLESS SCAN} using the server's default {@code COUNT} of 1024.
+     * <p>
+     * As with {@code SCAN}, a key may be returned more than once, and a key
+     * blessed or unblessed during the traversal may or may not be returned.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @return names of the protected keys
+     */
+    AsyncIterator<String> getBlessedKeysAsync();
+
+    /**
+     * Returns the keys of the current database protected from eviction by
+     * {@link #blessAsync(String)}, on all master nodes. Keys are traversed with
+     * {@code BLESS SCAN}.
+     * <p>
+     * As with {@code SCAN}, a key may be returned more than once, and a key
+     * blessed or unblessed during the traversal may or may not be returned.
+     * <p>
+     * Requires <b>Redis 8.12.0 or higher.</b>
+     *
+     * @param chunkSize keys loaded per request, a hint as for {@code SCAN COUNT};
+     *                  0 or less uses the server default
+     * @return names of the protected keys
+     */
+    AsyncIterator<String> getBlessedKeysAsync(int chunkSize);
+
+    /**
+     * Get all keys using iterable. Keys traversing with SCAN operation.
+     * Each SCAN operation loads up to <code>10</code> keys per request.
+     *
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<String> getKeysAsync();
+
+    /**
+     * Get all keys using iterable. Keys traversing with SCAN operation.
+     *
+     * @param options scan options
+     * @return Asynchronous Iterable object
+     */
+    AsyncIterator<String> getKeysAsync(KeysScanOptions options);
+
     /**
      * Get Redis object type by key
      * 
@@ -173,6 +320,21 @@ public interface RKeysAsync {
     RFuture<Long> deleteByPatternAsync(String pattern);
 
     /**
+     * Unlink multiple objects by a key pattern.
+     * <p>
+     * Method executes in <b>NON atomic way</b> in cluster mode due to lua script limitations.
+     * <p>
+     *  Supported glob-style patterns:
+     *    h?llo subscribes to hello, hallo and hxllo
+     *    h*llo subscribes to hllo and heeeello
+     *    h[ae]llo subscribes to hello and hallo, but not hillo
+     *
+     * @param pattern - match pattern
+     * @return number of removed keys
+     */
+    RFuture<Long> unlinkByPatternAsync(String pattern);
+
+    /**
      * Delete multiple objects
      *
      * @param objects of Redisson
@@ -205,6 +367,16 @@ public interface RKeysAsync {
      * @return number of keys
      */
     RFuture<Long> countAsync();
+
+    /**
+     * Returns the current Redis server time in async mode.
+     * <p>
+     * In cluster mode, the request is routed to the shard owning slot 0.
+     * This is not a cluster-wide timestamp.
+     *
+     * @return server time in seconds and microseconds
+     */
+    RFuture<Time> timeAsync();
 
     /**
      * Swap two databases.
@@ -248,5 +420,28 @@ public interface RKeysAsync {
      * @return void
      */
     RFuture<Void> flushallParallelAsync();
-    
+
+    /**
+     * Adds global object event listener
+     * which is invoked for each Redisson object.
+     *
+     * @see org.redisson.api.listener.TrackingListener
+     * @see org.redisson.api.listener.SetObjectListener
+     * @see org.redisson.api.listener.NewObjectListener
+     * @see org.redisson.api.listener.FlushListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
+     *
+     * @param listener object event listener
+     * @return listener id
+     */
+    RFuture<Integer> addListenerAsync(ObjectListener listener);
+
+    /**
+     * Removes global object event listener
+     *
+     * @param listenerId - listener id
+     */
+    RFuture<Void> removeListenerAsync(int listenerId);
+
 }

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,8 +22,6 @@ import java.util.function.Supplier;
 import org.redisson.api.RFuture;
 
 import io.reactivex.rxjava3.core.Flowable;
-import io.reactivex.rxjava3.functions.Action;
-import io.reactivex.rxjava3.functions.LongConsumer;
 import io.reactivex.rxjava3.processors.ReplayProcessor;
 
 /**
@@ -35,28 +33,20 @@ public class ElementsStream {
 
     public static <V> Flowable<V> takeElements(Supplier<RFuture<V>> callable) {
         ReplayProcessor<V> p = ReplayProcessor.create();
-        return p.doOnRequest(new LongConsumer() {
-            @Override
-            public void accept(long n) throws Exception {
-                AtomicLong counter = new AtomicLong(n);
-                AtomicReference<RFuture<V>> futureRef = new AtomicReference<RFuture<V>>();
-                
-                take(callable, p, counter, futureRef);
+        return p.doOnRequest(n -> {
+            AtomicLong counter = new AtomicLong(n);
+            AtomicReference<RFuture<V>> futureRef = new AtomicReference<RFuture<V>>();
 
-                p.doOnCancel(new Action() {
-                    @Override
-                    public void run() throws Exception {
-                        futureRef.get().cancel(true);
-                    }
-                });
-            }
+            take(callable, p, counter, futureRef);
+
+            p.doOnCancel(() -> futureRef.get().cancel(true));
         });
     }
     
     private static <V> void take(Supplier<RFuture<V>> factory, ReplayProcessor<V> p, AtomicLong counter, AtomicReference<RFuture<V>> futureRef) {
         RFuture<V> future = factory.get();
         futureRef.set(future);
-        future.onComplete((res, e) -> {
+        future.whenComplete((res, e) -> {
             if (e != null) {
                 p.onError(e);
                 return;

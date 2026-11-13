@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,18 +15,12 @@
  */
 package org.redisson.remote;
 
-import java.io.IOException;
-import java.lang.annotation.Annotation;
-import java.lang.reflect.Method;
-import java.util.Arrays;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
-
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.util.CharsetUtil;
+import org.redisson.RedissonBlockingQueue;
 import org.redisson.RedissonMap;
+import org.redisson.api.RBlockingQueue;
 import org.redisson.api.RFuture;
 import org.redisson.api.RMap;
 import org.redisson.api.RemoteInvocationOptions;
@@ -39,13 +33,17 @@ import org.redisson.codec.CompositeCodec;
 import org.redisson.command.CommandAsyncExecutor;
 import org.redisson.executor.RemotePromise;
 import org.redisson.misc.Hash;
-import org.redisson.misc.RPromise;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
-import io.netty.util.CharsetUtil;
-import io.netty.util.Timeout;
-import io.netty.util.TimerTask;
+import java.io.IOException;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
  * 
@@ -65,16 +63,14 @@ public abstract class BaseRemoteService {
     protected final String cancelRequestMapName;
     protected final String cancelResponseMapName;
     protected final String responseQueueName;
-    private final ConcurrentMap<String, ResponseEntry> responses;
 
-    public BaseRemoteService(Codec codec, String name, CommandAsyncExecutor commandExecutor, String executorId, ConcurrentMap<String, ResponseEntry> responses) {
-        this.codec = codec;
-        this.name = commandExecutor.getConnectionManager().getConfig().getNameMapper().map(name);
+    public BaseRemoteService(Codec codec, String name, CommandAsyncExecutor commandExecutor, String executorId) {
+        this.codec = commandExecutor.getServiceManager().getCodec(codec);
+        this.name = commandExecutor.getServiceManager().getNameMapper().map(name);
         this.commandExecutor = commandExecutor;
         this.executorId = executorId;
-        this.responses = responses;
-        this.cancelRequestMapName = "{" + name + ":remote" + "}:cancel-request";
-        this.cancelResponseMapName = "{" + name + ":remote" + "}:cancel-response";
+        this.cancelRequestMapName = "{" + this.name + ":remote" + "}:cancel-request";
+        this.cancelResponseMapName = "{" + this.name + ":remote" + "}:cancel-response";
         this.responseQueueName = getResponseQueueName(executorId);
     }
 
@@ -82,22 +78,12 @@ public abstract class BaseRemoteService {
         return "{remote_response}:" + executorId;
     }
     
-    protected String getAckName(RequestId requestId) {
-        return "{" + name + ":remote" + "}:" + requestId + ":ack";
-    }
-    
     protected String getAckName(String requestId) {
         return "{" + name + ":remote" + "}:" + requestId + ":ack";
     }
-
-
+    
     public String getRequestQueueName(Class<?> remoteInterface) {
-        String str = requestQueueNameCache.get(remoteInterface);
-        if (str == null) {
-            str = "{" + name + ":" + remoteInterface.getName() + "}";
-            requestQueueNameCache.put(remoteInterface, str);
-        }
-        return str;
+        return requestQueueNameCache.computeIfAbsent(remoteInterface, k -> "{" + name + ":" + k.getName() + "}");
     }
 
     protected ByteBuf encode(Object obj) {
@@ -127,24 +113,27 @@ public abstract class BaseRemoteService {
         for (Annotation annotation : remoteInterface.getAnnotations()) {
             if (annotation.annotationType() == RRemoteAsync.class) {
                 Class<T> syncInterface = (Class<T>) ((RRemoteAsync) annotation).value();
-                AsyncRemoteProxy proxy = new AsyncRemoteProxy(commandExecutor, name, responseQueueName, responses, codec, executorId, cancelRequestMapName, this);
+                AsyncRemoteProxy proxy = new AsyncRemoteProxy(commandExecutor, name, responseQueueName,
+                        codec, executorId, cancelRequestMapName, this);
                 return proxy.create(remoteInterface, options, syncInterface);
             }
 
             if (annotation.annotationType() == RRemoteReactive.class) {
                 Class<T> syncInterface = (Class<T>) ((RRemoteReactive) annotation).value();
-                ReactiveRemoteProxy proxy = new ReactiveRemoteProxy(commandExecutor, name, responseQueueName, responses, codec, executorId, cancelRequestMapName, this);
+                ReactiveRemoteProxy proxy = new ReactiveRemoteProxy(commandExecutor, name, responseQueueName,
+                        codec, executorId, cancelRequestMapName, this);
                 return proxy.create(remoteInterface, options, syncInterface);
             }
 
             if (annotation.annotationType() == RRemoteRx.class) {
                 Class<T> syncInterface = (Class<T>) ((RRemoteRx) annotation).value();
-                RxRemoteProxy proxy = new RxRemoteProxy(commandExecutor, name, responseQueueName, responses, codec, executorId, cancelRequestMapName, this);
+                RxRemoteProxy proxy = new RxRemoteProxy(commandExecutor, name, responseQueueName,
+                        codec, executorId, cancelRequestMapName, this);
                 return proxy.create(remoteInterface, options, syncInterface);
             }
         }
 
-        SyncRemoteProxy proxy = new SyncRemoteProxy(commandExecutor, name, responseQueueName, responses, codec, executorId, this);
+        SyncRemoteProxy proxy = new SyncRemoteProxy(commandExecutor, name, responseQueueName, codec, executorId, this);
         return proxy.create(remoteInterface, options);
     }
 
@@ -153,65 +142,63 @@ public abstract class BaseRemoteService {
     }
 
     protected <K, V> RMap<K, V> getMap(String name) {
-        return new RedissonMap<>(new CompositeCodec(StringCodec.INSTANCE, codec, codec), commandExecutor, name, null, null, null);
+        return new RedissonMap(new CompositeCodec(StringCodec.INSTANCE, codec, codec), commandExecutor, name) {
+            @Override
+            protected void setName(String name) {
+                this.name = name;
+            }
+        };
     }
     
-    protected <T> void scheduleCheck(String mapName, RequestId requestId, RPromise<T> cancelRequest) {
-        commandExecutor.getConnectionManager().newTimeout(new TimerTask() {
-            @Override
-            public void run(Timeout timeout) throws Exception {
+    protected <T> void scheduleCheck(String mapName, String requestId, CompletableFuture<T> cancelRequest) {
+        commandExecutor.getServiceManager().newTimeout(timeout -> {
+            if (cancelRequest.isDone()) {
+                return;
+            }
+
+            RMap<String, T> canceledRequests = getMap(mapName);
+            RFuture<T> future = canceledRequests.removeAsync(requestId);
+            future.whenComplete((request, ex) -> {
                 if (cancelRequest.isDone()) {
                     return;
                 }
+                if (ex != null) {
+                    scheduleCheck(mapName, requestId, cancelRequest);
+                    return;
+                }
 
-                RMap<String, T> canceledRequests = getMap(mapName);
-                RFuture<T> future = canceledRequests.removeAsync(requestId.toString());
-                future.onComplete((request, ex) -> {
-                    if (cancelRequest.isDone()) {
-                        return;
-                    }
-                    if (ex != null) {
-                        scheduleCheck(mapName, requestId, cancelRequest);
-                        return;
-                    }
-                    
-                    if (request == null) {
-                        scheduleCheck(mapName, requestId, cancelRequest);
-                    } else {
-                        cancelRequest.trySuccess(request);
-                    }
-                });
-            }
+                if (request == null) {
+                    scheduleCheck(mapName, requestId, cancelRequest);
+                } else {
+                    cancelRequest.complete(request);
+                }
+            });
         }, 3000, TimeUnit.MILLISECONDS);
     }
 
-    protected RequestId generateRequestId() {
-        byte[] id = new byte[16];
-        ThreadLocalRandom.current().nextBytes(id);
-        return new RequestId(id);
+    protected String generateRequestId(Object[] args) {
+        return commandExecutor.getServiceManager().generateId();
     }
 
-    protected abstract RFuture<Boolean> addAsync(String requestQueueName, RemoteServiceRequest request,
-            RemotePromise<Object> result);
+    protected abstract CompletableFuture<Boolean> addAsync(String requestQueueName, RemoteServiceRequest request,
+                                                           RemotePromise<Object> result);
 
-    protected abstract RFuture<Boolean> removeAsync(String requestQueueName, RequestId taskId);
+    protected abstract CompletableFuture<Boolean> removeAsync(String requestQueueName, String taskId);
 
     protected long[] getMethodSignature(Method method) {
-        long[] result = methodSignaturesCache.get(method);
-        if (result == null) {
-            String str = Arrays.stream(method.getParameterTypes())
+        return methodSignaturesCache.computeIfAbsent(method, m -> {
+            String str = Arrays.stream(m.getParameterTypes())
                                 .map(c -> c.getName())
                                 .collect(Collectors.joining());
             ByteBuf buf = Unpooled.copiedBuffer(str, CharsetUtil.UTF_8);
-            result = Hash.hash128(buf);
+            long[] result = Hash.hash128(buf);
             buf.release();
-            long[] oldResult = methodSignaturesCache.putIfAbsent(method, result);
-            if (oldResult != null) {
-                return oldResult;
-            }
-        }
-        
-        return result;
+            return result;
+        });
+    }
+
+    protected <V> RBlockingQueue<V> getBlockingQueue(String name, Codec codec) {
+        return new RedissonBlockingQueue<>(codec, commandExecutor, name);
     }
 
 }

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,28 +17,23 @@ package org.redisson.client.codec;
 
 import java.util.BitSet;
 
-import org.redisson.client.handler.State;
 import org.redisson.client.protocol.Decoder;
 import org.redisson.client.protocol.Encoder;
-
-import io.netty.buffer.ByteBuf;
 
 /**
  * 
  * @author Nikita Koksharov
  *
  */
+@Deprecated
 public class BitSetCodec implements Codec {
 
     public static final BitSetCodec INSTANCE = new BitSetCodec();
 
-    private final Decoder<Object> decoder = new Decoder<Object>() {
-        @Override
-        public Object decode(ByteBuf buf, State state) {
-            byte[] result = new byte[buf.readableBytes()];
-            buf.readBytes(result);
-            return fromByteArrayReverse(result);
-        }
+    private final Decoder<Object> decoder = (buf, state) -> {
+        byte[] result = new byte[buf.readableBytes()];
+        buf.readBytes(result);
+        return fromByteArrayReverse(result);
     };
 
     private static BitSet fromByteArrayReverse(byte[] bytes) {

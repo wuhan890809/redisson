@@ -1,32 +1,17 @@
 package org.redisson;
 
-import org.junit.jupiter.api.Assumptions;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.*;
-import org.redisson.api.geo.GeoSearchArgs;
+import org.redisson.api.geo.*;
 
-import java.io.IOException;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class RedissonGeoTest extends BaseTest {
+public class RedissonGeoTest extends RedisDockerTest {
 
-    @BeforeAll
-    public static void checkRedisVersion() throws IOException, InterruptedException {
-        boolean running = RedisRunner.isDefaultRedisServerInstanceRunning();
-        if (!running) {
-            RedisRunner.startDefaultRedisServerInstance();
-        }
-        Assumptions.assumeTrue(RedisRunner.getDefaultRedisServerInstance().getRedisVersion().compareTo("3.1.0") > 0);
-        if (!running) {
-            RedisRunner.shutDownDefaultRedisServerInstance();
-        }
-    }
-    
     @Test
     public void testAdd() {
         RGeo<String> geo = redisson.getGeo("test");

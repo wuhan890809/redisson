@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,6 @@ import org.redisson.config.Config;
 import org.redisson.hibernate.region.*;
 
 import java.io.File;
-import java.io.IOException;
 import java.io.InputStream;
 import java.util.Collections;
 import java.util.Properties;
@@ -90,7 +89,7 @@ import java.util.concurrent.atomic.AtomicLong;
                                 properties.get(Environment.CACHE_KEYS_FACTORY), new RedissonCacheKeysFactory(redisson.getConfig().getCodec()));
 
         String fallbackValue = (String) properties.getOrDefault(FALLBACK, "false");
-        fallback = Boolean.valueOf(fallbackValue);
+        fallback = Boolean.parseBoolean(fallbackValue);
     }
     
     protected RedissonClient createRedissonClient(Properties properties) {
@@ -118,13 +117,8 @@ import java.util.concurrent.atomic.AtomicLong;
     private Config loadConfig(String configPath) {
         try {
             return Config.fromYAML(new File(configPath));
-        } catch (IOException e) {
-            // trying next format
-            try {
-                return Config.fromJSON(new File(configPath));
-            } catch (IOException e1) {
-                throw new CacheException("Can't parse default yaml config", e1);
-            }
+        } catch (Exception e) {
+            throw new CacheException("Can't parse default config", e);
         }
     }
     
@@ -133,13 +127,8 @@ import java.util.concurrent.atomic.AtomicLong;
         if (is != null) {
             try {
                 return Config.fromYAML(is);
-            } catch (IOException e) {
-                try {
-                    is = classLoader.getResourceAsStream(fileName);
-                    return Config.fromJSON(is);
-                } catch (IOException e1) {
-                    throw new CacheException("Can't parse yaml config", e1);
-                }
+            } catch (Exception e) {
+                throw new CacheException("Can't parse config", e);
             }
         }
         return null;
@@ -173,7 +162,7 @@ import java.util.concurrent.atomic.AtomicLong;
                             + "local nextValue = math.max(tonumber(ARGV[1]), tonumber(currentTime) + 1); "
                             + "redis.call('set', KEYS[1], nextValue); "
                             + "return nextValue;",
-                            RScript.ReturnType.INTEGER, Collections.singletonList("redisson-hibernate-timestamp"), time);
+                            RScript.ReturnType.LONG, Collections.singletonList("redisson-hibernate-timestamp"), time);
         } catch (Exception e) {
             if (fallback) {
                 while (true) {
@@ -200,7 +189,7 @@ import java.util.concurrent.atomic.AtomicLong;
         log.debug("Building entity cache region: " + regionName);
 
         RMapCache<Object, Object> mapCache = getCache(regionName, properties, ENTITY_DEF);
-        return new RedissonEntityRegion(mapCache, ((Redisson)redisson).getConnectionManager(),this, metadata, settings, properties, ENTITY_DEF, cacheKeysFactory);
+        return new RedissonEntityRegion(mapCache, ((Redisson)redisson).getServiceManager(),this, metadata, settings, properties, ENTITY_DEF, cacheKeysFactory);
     }
 
     @Override
@@ -209,7 +198,7 @@ import java.util.concurrent.atomic.AtomicLong;
         log.debug("Building naturalId cache region: " + regionName);
         
         RMapCache<Object, Object> mapCache = getCache(regionName, properties, NATURAL_ID_DEF);
-        return new RedissonNaturalIdRegion(mapCache, ((Redisson)redisson).getConnectionManager(),this, metadata, settings, properties, NATURAL_ID_DEF, cacheKeysFactory);
+        return new RedissonNaturalIdRegion(mapCache, ((Redisson)redisson).getServiceManager(),this, metadata, settings, properties, NATURAL_ID_DEF, cacheKeysFactory);
     }
 
     @Override
@@ -218,7 +207,7 @@ import java.util.concurrent.atomic.AtomicLong;
         log.debug("Building collection cache region: " + regionName);
         
         RMapCache<Object, Object> mapCache = getCache(regionName, properties, COLLECTION_DEF);
-        return new RedissonCollectionRegion(mapCache, ((Redisson)redisson).getConnectionManager(),this, metadata, settings, properties, COLLECTION_DEF, cacheKeysFactory);
+        return new RedissonCollectionRegion(mapCache, ((Redisson)redisson).getServiceManager(),this, metadata, settings, properties, COLLECTION_DEF, cacheKeysFactory);
     }
 
     @Override
@@ -226,7 +215,7 @@ import java.util.concurrent.atomic.AtomicLong;
         log.debug("Building query cache region: " + regionName);
         
         RMapCache<Object, Object> mapCache = getCache(regionName, properties, QUERY_DEF);
-        return new RedissonQueryRegion(mapCache, ((Redisson)redisson).getConnectionManager(),this, properties, QUERY_DEF);
+        return new RedissonQueryRegion(mapCache, ((Redisson)redisson).getServiceManager(),this, properties, QUERY_DEF);
     }
 
     @Override
@@ -234,7 +223,7 @@ import java.util.concurrent.atomic.AtomicLong;
         log.debug("Building timestamps cache region: " + regionName);
         
         RMapCache<Object, Object> mapCache = getCache(regionName, properties, TIMESTAMPS_DEF);
-        return new RedissonTimestampsRegion(mapCache, ((Redisson)redisson).getConnectionManager(),this, properties, TIMESTAMPS_DEF);
+        return new RedissonTimestampsRegion(mapCache, ((Redisson)redisson).getServiceManager(),this, properties, TIMESTAMPS_DEF);
     }
     
     protected RMapCache<Object, Object> getCache(String regionName, Properties properties, String defaultKey) {

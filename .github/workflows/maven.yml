@@ -1,24 +1,45 @@
 name: Java CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
+  pull-requests: write
+
+env:
+  MAVEN_VERSION: 3.9.16
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v2
-    - name: Set up JDK 1.8
-      uses: actions/setup-java@v1
-      with:
-        java-version: 1.8
-    - name: Cache local Maven repository
-      uses: actions/cache@v2
-      with:
-        path: ~/.m2/repository
-        key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
-        restore-keys: |
-          ${{ runner.os }}-maven-
-    - name: Build with Maven
-      run: mvn -B verify --file pom.xml
+      - uses: actions/checkout@v6
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: 25
+          distribution: temurin
+          cache: maven
+
+      - name: Set up Maven ${{ env.MAVEN_VERSION }}
+        run: |
+          curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 \
+            "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+            -o "$RUNNER_TEMP/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          tar xzf "$RUNNER_TEMP/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Build with Maven
+        run: |
+          mvn -v
+          mvn -T 1C -B clean verify -DskipTests -Dmaven.test.skip=false --file pom.xml

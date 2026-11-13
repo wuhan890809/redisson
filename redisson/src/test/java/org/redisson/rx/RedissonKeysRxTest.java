@@ -1,18 +1,71 @@
 package org.redisson.rx;
 
 import io.reactivex.rxjava3.core.Flowable;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.redisson.Redisson;
 import org.redisson.api.RBucketRx;
 import org.redisson.api.RKeysRx;
 import org.redisson.api.RMapRx;
-import reactor.core.publisher.Flux;
+import org.redisson.api.RedissonClient;
+import org.redisson.api.options.KeysScanOptions;
+import org.redisson.client.codec.StringCodec;
+import org.redisson.client.protocol.Time;
+import org.testcontainers.containers.GenericContainer;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class RedissonKeysRxTest extends BaseRxTest {
+
+    @Test
+    public void testTime() {
+        Time time = sync(redisson.getKeys().time());
+
+        assertThat(time.getSeconds()).isPositive();
+        assertThat(time.getMicroseconds()).isBetween(0, 999999);
+    }
+
+    private static GenericContainer<?> redis812;
+    private static RedissonClient redisson812;
+
+    @BeforeAll
+    static void startRedis812() {
+        redis812 = createRedis812();
+        redis812.start();
+        redisson812 = Redisson.create(createConfig(redis812));
+    }
+
+    @AfterAll
+    static void stopRedis812() {
+        redisson812.shutdown();
+        redis812.stop();
+    }
+
+    @Test
+    public void testBlessReactiveAndRx() {
+        redisson812.getKeys().flushall();
+        redisson812.getBucket("testBlessRx").set("v");
+
+        RKeysRx rx = redisson812.rxJava().getKeys();
+        assertThat(rx.bless("testBlessRx").blockingGet()).isTrue();
+        assertThat(rx.isBlessed("testBlessRx").blockingGet()).isTrue();
+
+        assertThat(rx.getBlessedKeys().toList().blockingGet())
+                .containsExactlyInAnyOrder("testBlessRx");
+        assertThat(rx.getBlessedKeys(1).toList().blockingGet())
+                .containsExactlyInAnyOrder("testBlessRx");
+
+        assertThat(rx.unbless("testBlessRx").blockingGet()).isTrue();
+    }
 
     @Test
     public void testGetKeys() {
@@ -63,6 +116,16 @@ public class RedissonKeysRxTest extends BaseRxTest {
     }
 
     @Test
+    public void testUnlinkByPattern() {
+        RBucketRx<String> bucket = redisson.getBucket("test1");
+        sync(bucket.set("someValue"));
+        RMapRx<String, String> map = redisson.getMap("test2");
+        sync(map.fastPut("1", "2"));
+
+        Assertions.assertEquals(2, sync(redisson.getKeys().unlinkByPattern("test?")).intValue());
+    }
+
+    @Test
     public void testMassDelete() {
         RBucketRx<String> bucket = redisson.getBucket("test");
         sync(bucket.set("someValue"));
@@ -71,6 +134,91 @@ public class RedissonKeysRxTest extends BaseRxTest {
 
         Assertions.assertEquals(2, sync(redisson.getKeys().delete("test", "map2")).intValue());
         Assertions.assertEquals(0, sync(redisson.getKeys().delete("test", "map2")).intValue());
+    }
+
+    @Test
+    public void testExpire() {
+        Long s = sync(redisson.getKeys().count());
+        assertThat(s).isEqualTo(0);
+
+        sync(redisson.getBucket("expire-test1").set(23, Duration.ofHours(1)));
+        sync(redisson.getBucket("expire-test2").set(23, Duration.ofHours(1)));
+        s = sync(redisson.getKeys().expire(Duration.ofDays(1), new String[]{"expire-test1", "expire-test2"}));
+        assertThat(s).isEqualTo(2);
+
+        long ttl1 = sync(redisson.getBucket("expire-test1").remainTimeToLive());
+        long ttl2 = sync(redisson.getBucket("expire-test2").remainTimeToLive());
+        assertThat(ttl1).isGreaterThan(TimeUnit.HOURS.toMillis(23));
+        assertThat(ttl2).isGreaterThan(TimeUnit.HOURS.toMillis(23));
+
+        long ts = System.currentTimeMillis() + TimeUnit.DAYS.toMillis(2);
+        s = sync(redisson.getKeys().expireAt(Instant.ofEpochMilli(ts), "expire-test1", "expire-test2"));
+        assertThat(s).isEqualTo(2);
+
+        ttl1 = sync(redisson.getBucket("expire-test1").remainTimeToLive());
+        assertThat(ttl1).isGreaterThan(TimeUnit.DAYS.toMillis(1));
+        ttl2 = sync(redisson.getBucket("expire-test2").remainTimeToLive());
+        assertThat(ttl2).isGreaterThan(TimeUnit.DAYS.toMillis(1));
+
+        s = sync(redisson.getKeys().expire(Duration.ofDays(1), "expire-miss"));
+        assertThat(s).isEqualTo(0);
+
+        s = sync(redisson.getKeys().expireAt(Instant.ofEpochMilli(ts), "expire-miss"));
+        assertThat(s).isEqualTo(0);
+    }
+
+    @Test
+    public void testGetKeysByPatternFull() {
+        int expected = 200;
+        for (int i = 0; i < expected; i++) {
+            redisson.getBucket("pattern-test:" + i, StringCodec.INSTANCE)
+                    .set(Integer.toString(i)).blockingAwait();
+        }
+
+        assertThat(redisson.getKeys().count().blockingGet()).isEqualTo(expected);
+
+        List<String> shareKeys = redisson.getKeys()
+                .getKeys(KeysScanOptions.defaults().pattern("pattern-test:*"))
+                .toList()
+                .blockingGet();
+
+        Map<String, Object> bucketMap = redisson
+                .getBuckets(StringCodec.INSTANCE)
+                .get(shareKeys.toArray(new String[0]))
+                .blockingGet();
+
+        assertThat(shareKeys).hasSize(expected);
+        assertThat(bucketMap).hasSize(expected);
+    }
+
+    @Test
+    public void testGetKeysEmptyDatabase() {
+        List<String> result = redisson.getKeys().getKeys().toList().blockingGet();
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    public void testGetKeysPartialRequestReturnsExactCount() {
+        int total = 50;
+        for (int i = 0; i < total; i++) {
+            redisson.getBucket("partial-test:" + i, StringCodec.INSTANCE)
+                    .set(Integer.toString(i)).blockingAwait();
+        }
+
+        // Requests fewer items than exist (via take(5)) while the chunk size (10)
+        // forces multiple SCAN round-trips underneath. Exercises the RxIteratorConsumer's
+        // request-counting path with partial downstream demand instead of unbounded demand.
+        List<String> firstFive = redisson.getKeys()
+                .getKeys(KeysScanOptions.defaults().pattern("partial-test:*").chunkSize(10))
+                .take(5)
+                .toList()
+                .blockingGet();
+
+        assertThat(firstFive).hasSize(5);
+        assertThat(firstFive).doesNotHaveDuplicates();
+        for (String key : firstFive) {
+            assertThat(key).startsWith("partial-test:");
+        }
     }
 
 }

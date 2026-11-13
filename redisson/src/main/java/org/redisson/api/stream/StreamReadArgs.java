@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,10 +15,7 @@
  */
 package org.redisson.api.stream;
 
-import org.redisson.api.StreamMessageId;
-
 import java.time.Duration;
-import java.util.Collections;
 
 /**
  * Arguments object for RStream.read() methods.
@@ -31,15 +28,36 @@ public interface StreamReadArgs {
     /**
      * Defines stream data size limit.
      *
-     * @param count - stream data size limit
+     * @param count stream data size limit
      * @return arguments object
      */
     StreamReadArgs count(int count);
 
     /**
-     * Defines time interval to wait for stream data availability.
+     * Defines the total limit of entries returned in the command reply.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
      *
-     * @param timeout - timeout duration
+     * @param maxCount total entries limit
+     * @return arguments object
+     */
+    StreamReadArgs maxCount(int maxCount);
+
+    /**
+     * Defines the total size limit in bytes of entries returned in the command reply.
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param maxSize total entries size limit in bytes
+     * @return arguments object
+     */
+    StreamReadArgs maxSize(long maxSize);
+
+    /**
+     * Defines time interval to wait for stream data availability.
+     * <code>0</code> is used to wait infinitely.
+     *
+     * @param timeout timeout duration
      * @return arguments object
      */
     StreamReadArgs timeout(Duration timeout);
@@ -48,11 +66,11 @@ public interface StreamReadArgs {
      * Defines last stream id received from current Stream.
      * Read stream data with ids greater than defined id.
      *
-     * @param id0 - last stream id of current stream
+     * @param id0 last stream id of current stream
      * @return arguments object
      */
     static StreamReadArgs greaterThan(StreamMessageId id0) {
-        return new BaseStreamReadArgs(id0, Collections.emptyMap());
+        return new StreamReadParams(id0);
     }
 
 }

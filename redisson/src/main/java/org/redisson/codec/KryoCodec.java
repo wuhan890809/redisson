@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,11 +23,8 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufInputStream;
 import io.netty.buffer.ByteBufOutputStream;
 import org.redisson.client.codec.BaseCodec;
-import org.redisson.client.handler.State;
 import org.redisson.client.protocol.Decoder;
 import org.redisson.client.protocol.Encoder;
-
-import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Queue;
@@ -57,49 +54,42 @@ public class KryoCodec extends BaseCodec {
     private final List<Class<?>> classes;
     private final ClassLoader classLoader;
 
-    private final Decoder<Object> decoder = new Decoder<Object>() {
-        @Override
-        public Object decode(ByteBuf buf, State state) throws IOException {
-            Kryo kryo = null;
-            try {
-                kryo = get();
-                return kryo.readClassAndObject(new Input(new ByteBufInputStream(buf)));
-            } catch (Exception e) {
-                if (e instanceof RuntimeException) {
-                    throw (RuntimeException) e;
-                }
-                throw new RedissonKryoCodecException(e);
-            } finally {
-                if (kryo != null) {
-                    yield(kryo);
-                }
+    private final Decoder<Object> decoder = (buf, state) -> {
+        Kryo kryo = null;
+        try {
+            kryo = get();
+            return kryo.readClassAndObject(new Input(new ByteBufInputStream(buf)));
+        } catch (Exception e) {
+            if (e instanceof RuntimeException) {
+                throw (RuntimeException) e;
+            }
+            throw new RedissonKryoCodecException(e);
+        } finally {
+            if (kryo != null) {
+                offer(kryo);
             }
         }
     };
 
-    private final Encoder encoder = new Encoder() {
-
-        @Override
-        public ByteBuf encode(Object in) throws IOException {
-            Kryo kryo = null;
-            ByteBuf out = ByteBufAllocator.DEFAULT.buffer();
-            try {
-                ByteBufOutputStream baos = new ByteBufOutputStream(out);
-                Output output = new Output(baos);
-                kryo = get();
-                kryo.writeClassAndObject(output, in);
-                output.close();
-                return baos.buffer();
-            } catch (Exception e) {
-                out.release();
-                if (e instanceof RuntimeException) {
-                    throw (RuntimeException) e;
-                }
-                throw new RedissonKryoCodecException(e);
-            } finally {
-                if (kryo != null) {
-                    yield(kryo);
-                }
+    private final Encoder encoder = in -> {
+        Kryo kryo = null;
+        ByteBuf out = ByteBufAllocator.DEFAULT.buffer();
+        try {
+            ByteBufOutputStream baos = new ByteBufOutputStream(out);
+            Output output = new Output(baos);
+            kryo = get();
+            kryo.writeClassAndObject(output, in);
+            output.close();
+            return baos.buffer();
+        } catch (Exception e) {
+            out.release();
+            if (e instanceof RuntimeException) {
+                throw (RuntimeException) e;
+            }
+            throw new RedissonKryoCodecException(e);
+        } finally {
+            if (kryo != null) {
+                offer(kryo);
             }
         }
     };
@@ -133,7 +123,7 @@ public class KryoCodec extends BaseCodec {
         return kryo;
     }
 
-    public void yield(Kryo kryo) {
+    public void offer(Kryo kryo) {
         objects.offer(kryo);
     }
 

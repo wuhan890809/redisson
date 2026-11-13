@@ -1,44 +1,38 @@
 package org.redisson;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import io.reactivex.rxjava3.core.Completable;
+import io.reactivex.rxjava3.core.Single;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.redisson.api.*;
+import org.redisson.api.annotation.RRemoteAsync;
+import org.redisson.api.annotation.RRemoteReactive;
+import org.redisson.api.annotation.RRemoteRx;
+import nl.altindag.log.LogCaptor;
+import org.redisson.client.handler.CommandDecoder;
+import org.redisson.codec.SerializationCodec;
+import org.redisson.config.Config;
+import org.redisson.remote.RemoteServiceAckTimeoutException;
+import org.redisson.remote.RemoteServiceTimeoutException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import reactor.core.Disposable;
+import reactor.core.publisher.Mono;
 
 import java.io.IOException;
 import java.io.NotSerializableException;
 import java.io.Serializable;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Test;
-import org.redisson.api.RFuture;
-import org.redisson.api.RRemoteService;
-import org.redisson.api.RedissonClient;
-import org.redisson.api.RedissonReactiveClient;
-import org.redisson.api.RedissonRxClient;
-import org.redisson.api.RemoteInvocationOptions;
-import org.redisson.api.annotation.RRemoteAsync;
-import org.redisson.api.annotation.RRemoteReactive;
-import org.redisson.api.annotation.RRemoteRx;
-import org.redisson.codec.SerializationCodec;
-import org.redisson.remote.RemoteServiceAckTimeoutException;
-import org.redisson.remote.RemoteServiceTimeoutException;
+import static org.assertj.core.api.Assertions.assertThat;
 
-import io.reactivex.rxjava3.core.Completable;
-import io.reactivex.rxjava3.core.Single;
-import reactor.core.Disposable;
-import reactor.core.publisher.Mono;
-
-public class RedissonRemoteServiceTest extends BaseTest {
+public class RedissonRemoteServiceTest extends RedisDockerTest {
+    private static final Logger log = LoggerFactory.getLogger(RedissonRemoteServiceTest.class);
 
     public static class Pojo {
 
@@ -345,17 +339,18 @@ public class RedissonRemoteServiceTest extends BaseTest {
     public void testFreeWorkers() throws InterruptedException, ExecutionException {
         RedissonClient r1 = createInstance();
         ExecutorService executor = Executors.newSingleThreadExecutor();
-        RRemoteService rs = r1.getRemoteService();
+        RRemoteService rs = r1.getRemoteService("testFreeWorkers");
         rs.register(RemoteInterface.class, new RemoteImpl(), 1, executor);
         assertThat(rs.getFreeWorkers(RemoteInterface.class)).isEqualTo(1);
         
         RedissonClient r2 = createInstance();
-        RemoteInterfaceAsync ri = r2.getRemoteService().get(RemoteInterfaceAsync.class);
+        RemoteInterfaceAsync ri = r2.getRemoteService("testFreeWorkers").get(RemoteInterfaceAsync.class);
         
         RFuture<Void> f = ri.timeoutMethod();
-        Thread.sleep(100);
+        Thread.sleep(200);
         assertThat(rs.getFreeWorkers(RemoteInterface.class)).isEqualTo(0);
         f.get();
+        Thread.sleep(200);
         assertThat(rs.getFreeWorkers(RemoteInterface.class)).isEqualTo(1);
 
         r1.shutdown();
@@ -370,11 +365,10 @@ public class RedissonRemoteServiceTest extends BaseTest {
         RedissonClient r1 = createInstance();
         AtomicInteger iterations = new AtomicInteger();
         ExecutorService executor = Executors.newSingleThreadExecutor();
-        r1.getKeys().flushall();
-        r1.getRemoteService().register(RemoteInterface.class, new RemoteImpl(iterations), 1, executor);
+        r1.getRemoteService("testCancelAsync").register(RemoteInterface.class, new RemoteImpl(iterations), 1, executor);
         
         RedissonClient r2 = createInstance();
-        RemoteInterfaceAsync ri = r2.getRemoteService().get(RemoteInterfaceAsync.class);
+        RemoteInterfaceAsync ri = r2.getRemoteService("testCancelAsync").get(RemoteInterfaceAsync.class);
         
         RFuture<Void> f = ri.cancelMethod();
         Thread.sleep(500);
@@ -391,13 +385,12 @@ public class RedissonRemoteServiceTest extends BaseTest {
 
     @Test
     public void testCancelReactive() throws InterruptedException {
-        RedissonReactiveClient r1 = Redisson.create(createConfig()).reactive();
+        RedissonReactiveClient r1 = createInstance().reactive();
         AtomicInteger iterations = new AtomicInteger();
         ExecutorService executor = Executors.newSingleThreadExecutor();
-        r1.getKeys().flushall();
         r1.getRemoteService().register(RemoteInterface.class, new RemoteImpl(iterations), 1, executor);
         
-        RedissonReactiveClient r2 = Redisson.create(createConfig()).reactive();
+        RedissonReactiveClient r2 = createInstance().reactive();
         RemoteInterfaceReactive ri = r2.getRemoteService().get(RemoteInterfaceReactive.class);
         
         Mono<Void> f = ri.cancelMethod();
@@ -410,6 +403,34 @@ public class RedissonRemoteServiceTest extends BaseTest {
         r2.shutdown();
         
         assertThat(iterations.get()).isLessThan(Integer.MAX_VALUE / 2);
+        
+        assertThat(executor.awaitTermination(2, TimeUnit.SECONDS)).isTrue();
+    }
+    
+    @Test
+    public void testCancelRxJava() throws InterruptedException {
+        RedissonRxClient r1 = createInstance().rxJava();
+        AtomicInteger iterations = new AtomicInteger();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        r1.getRemoteService().register(RemoteInterface.class, new RemoteImpl(iterations), 1, executor);
+        
+        RedissonRxClient r2 = createInstance().rxJava();
+        RemoteInterfaceRx ri = r2.getRemoteService().get(RemoteInterfaceRx.class);
+        
+        Completable f = ri.cancelMethod();
+        io.reactivex.rxjava3.disposables.Disposable t = f.subscribe();
+        Thread.sleep(500);
+        t.dispose();
+        
+        Thread.sleep(500);
+        int disposedIterations = iterations.get();
+        Thread.sleep(500);
+        
+        executor.shutdown();
+        r1.shutdown();
+        r2.shutdown();
+        
+        assertThat(iterations.get()).isEqualTo(disposedIterations);
         
         assertThat(executor.awaitTermination(2, TimeUnit.SECONDS)).isTrue();
     }
@@ -429,7 +450,7 @@ public class RedissonRemoteServiceTest extends BaseTest {
     }
     
     @Test
-    public void testAsync() throws InterruptedException {
+    public void testAsync() {
         RedissonClient r1 = createInstance();
         r1.getRemoteService().register(RemoteInterface.class, new RemoteImpl());
         
@@ -437,21 +458,21 @@ public class RedissonRemoteServiceTest extends BaseTest {
         RemoteInterfaceAsync ri = r2.getRemoteService().get(RemoteInterfaceAsync.class);
         
         RFuture<Void> f = ri.voidMethod("someName", 100L);
-        f.sync();
+        f.toCompletableFuture().join();
         RFuture<Long> resFuture = ri.resultMethod(100L);
-        resFuture.sync();
-        assertThat(resFuture.getNow()).isEqualTo(200);
+        resFuture.toCompletableFuture().join();
+        assertThat(resFuture.toCompletableFuture().join()).isEqualTo(200);
 
         r1.shutdown();
         r2.shutdown();
     }
 
     @Test
-    public void testReactive() throws InterruptedException {
-        RedissonReactiveClient r1 = Redisson.create(createConfig()).reactive();
+    public void testReactive() {
+        RedissonReactiveClient r1 = createInstance().reactive();
         r1.getRemoteService().register(RemoteInterface.class, new RemoteImpl());
         
-        RedissonReactiveClient r2 = Redisson.create(createConfig()).reactive();
+        RedissonClient r2 = createInstance();
         RemoteInterfaceReactive ri = r2.getRemoteService().get(RemoteInterfaceReactive.class);
         
         Mono<Void> f = ri.voidMethod("someName", 100L);
@@ -465,10 +486,10 @@ public class RedissonRemoteServiceTest extends BaseTest {
 
     @Test
     public void testRx() {
-        RedissonRxClient r1 = Redisson.create(createConfig()).rxJava();
+        RedissonRxClient r1 = createInstance().rxJava();
         r1.getRemoteService().register(RemoteInterface.class, new RemoteImpl());
         
-        RedissonRxClient r2 = Redisson.create(createConfig()).rxJava();
+        RedissonRxClient r2 = createInstance().rxJava();
         RemoteInterfaceRx ri = r2.getRemoteService().get(RemoteInterfaceRx.class);
         
         Completable f = ri.voidMethod("someName", 100L);
@@ -490,10 +511,9 @@ public class RedissonRemoteServiceTest extends BaseTest {
         RemoteInterfaceAsync ri = r2.getRemoteService().get(RemoteInterfaceAsync.class);
         
         RFuture<Void> f = ri.voidMethod("someName", 100L);
-        f.sync();
+        f.toCompletableFuture().join();
         RFuture<Long> resFuture = ri.resultMethod(100L);
-        resFuture.sync();
-        assertThat(resFuture.getNow()).isEqualTo(200);
+        assertThat(resFuture.toCompletableFuture().join()).isEqualTo(200);
 
         r1.shutdown();
         r2.shutdown();
@@ -548,16 +568,13 @@ public class RedissonRemoteServiceTest extends BaseTest {
         java.util.concurrent.Future[] clientFutures = new java.util.concurrent.Future[clientAmount];
         ExecutorService executor = Executors.newFixedThreadPool(clientAmount);
         for (int i = 0; i < clientAmount; i++) {
-            clientFutures[i] = executor.submit(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        RemoteInterface ri = client.getRemoteService().get(RemoteInterface.class, clientAmount * 3, TimeUnit.SECONDS, clientAmount * 3, TimeUnit.SECONDS);
-                        readyLatch.await();
-                        ri.timeoutMethod();
-                    } catch (InterruptedException e) {
-                        // ignore
-                    }
+            clientFutures[i] = executor.submit(() -> {
+                try {
+                    RemoteInterface ri = client.getRemoteService().get(RemoteInterface.class, clientAmount * 3, TimeUnit.SECONDS, clientAmount * 3, TimeUnit.SECONDS);
+                    readyLatch.await();
+                    ri.timeoutMethod();
+                } catch (InterruptedException e) {
+                    // ignore
                 }
             });
         }
@@ -643,23 +660,19 @@ public class RedissonRemoteServiceTest extends BaseTest {
 
         RemoteInterface serviceRemoteInterface = client.getRemoteService("MyServiceNamespace").get(RemoteInterface.class);
         RemoteInterface otherServiceRemoteInterface = client.getRemoteService("MyOtherServiceNamespace").get(RemoteInterface.class);
-        RemoteInterface defaultServiceRemoteInterface = client.getRemoteService().get(RemoteInterface.class);
+        RemoteInterface defaultServiceRemoteInterface = client.getRemoteService("MyOtherServiceNamespace2").get(RemoteInterface.class);
 
         assertThat(serviceRemoteInterface.resultMethod(21L)).isEqualTo(42L);
 
-        try {
+        // Invoking a service in an unregistered custom services namespace should throw
+        Assertions.assertThrows(RemoteServiceAckTimeoutException.class, () -> {
             otherServiceRemoteInterface.resultMethod(21L);
-            Assertions.fail("Invoking a service in an unregistered custom services namespace should throw");
-        } catch (Exception e) {
-            assertThat(e).isInstanceOf(RemoteServiceAckTimeoutException.class);
-        }
+        });
 
-        try {
+        // Invoking a service in the unregistered default services namespace should throw
+        Assertions.assertThrows(RemoteServiceAckTimeoutException.class, () -> {
             defaultServiceRemoteInterface.resultMethod(21L);
-            Assertions.fail("Invoking a service in the unregistered default services namespace should throw");
-        } catch (Exception e) {
-            assertThat(e).isInstanceOf(RemoteServiceAckTimeoutException.class);
-        }
+        });
 
         client.shutdown();
         server.shutdown();
@@ -670,28 +683,26 @@ public class RedissonRemoteServiceTest extends BaseTest {
         RedissonClient client = createInstance();
         try {
             RemoteInterface service = client.getRemoteService().get(RemoteInterface.class);
-
-            try {
-                System.out.println(service.toString());
-            } catch (Exception e) {
-                Assertions.fail("calling toString on the client service proxy should not make a remote call");
-            }
-
-            try {
-                assertThat(service.hashCode() == service.hashCode()).isTrue();
-            } catch (Exception e) {
-                Assertions.fail("calling hashCode on the client service proxy should not make a remote call");
-            }
-
-            try {
-                assertThat(service.equals(service)).isTrue();
-            } catch (Exception e) {
-                Assertions.fail("calling equals on the client service proxy should not make a remote call");
-            }
-
+            assertThat(service.toString()).contains(RemoteInterface.class.getName());
+            assertThat(service.hashCode()).isEqualTo(service.hashCode());
+            assertThat(service).isEqualTo(service);
         } finally {
             client.shutdown();
         }
+    }
+
+    @Test
+    public void testInnerCodec() {
+        Config config = createConfig();
+        config.setCodec(new SerializationCodec() {});
+
+        RedissonClient redisson = Redisson.create(config);
+        redisson.getRemoteService().register(RemoteInterface.class, new RemoteImpl());
+
+        RemoteInterface service = redisson.getRemoteService().get(RemoteInterface.class);
+        assertThat(service.resultMethod(21L)).isEqualTo(42L);
+
+        redisson.shutdown();
     }
 
     @Test
@@ -699,9 +710,9 @@ public class RedissonRemoteServiceTest extends BaseTest {
         RedissonClient server = Redisson.create(createConfig().setCodec(new SerializationCodec()));
         RedissonClient client = Redisson.create(createConfig().setCodec(new SerializationCodec()));
         try {
-            server.getRemoteService().register(RemoteInterface.class, new RemoteImpl());
+            server.getRemoteService("testInvocationWithSerializationCodec").register(RemoteInterface.class, new RemoteImpl());
 
-            RemoteInterface service = client.getRemoteService().get(RemoteInterface.class);
+            RemoteInterface service = client.getRemoteService("testInvocationWithSerializationCodec").get(RemoteInterface.class);
 
             try {
                 assertThat(service.resultMethod(21L)).isEqualTo(42L);
@@ -817,11 +828,11 @@ public class RedissonRemoteServiceTest extends BaseTest {
         RedissonClient server = createInstance();
         RedissonClient client = createInstance();
         try {
-            server.getRemoteService().register(RemoteInterface.class, new RemoteImpl());
+            server.getRemoteService("testAckWithoutResultInvocations").register(RemoteInterface.class, new RemoteImpl());
 
             // fire and forget with an ack timeout of 1 sec
             RemoteInvocationOptions options = RemoteInvocationOptions.defaults().expectAckWithin(1, TimeUnit.SECONDS).noResult();
-            RemoteInterface service = client.getRemoteService().get(RemoteInterface.class, options);
+            RemoteInterface service = client.getRemoteService("testAckWithoutResultInvocations").get(RemoteInterface.class, options);
 
             service.voidMethod("noResult", 100L);
 
@@ -925,5 +936,213 @@ public class RedissonRemoteServiceTest extends BaseTest {
 
         r1.shutdown();
         r2.shutdown();
+    }
+    
+    @Test
+    public void testDelayMethod() throws InterruptedException {
+        RedissonClient client = createInstance();
+        RRemoteService r1 = client.getRemoteService();
+        r1.register(RemoteInterface.class, new RemoteImpl());
+
+        RemoteInvocationOptions options = RemoteInvocationOptions.defaults().noAck().expectResultWithin(1, TimeUnit.SECONDS);
+        Assertions.assertThrows(RemoteServiceTimeoutException.class, () -> r1.get(RemoteInterface.class, options).timeoutMethod());
+
+        RFuture<Void> future = r1.get(RemoteInterfaceAsync.class, options).timeoutMethod();
+        Thread.sleep(3000);
+        assertThat(future.isDone()).isEqualTo(true);
+        client.shutdown();
+    }
+
+    public interface Service {
+        boolean process();
+    }
+
+    public static class ServiceImpl implements Service {
+        @Override
+        public boolean process() {
+            return true;
+        }
+    }
+
+    @Test
+    public void testAckUnordered() throws InterruptedException {
+        RedissonClient server = createInstance();
+        RedissonClient client = createInstance();
+        try {
+            final long lowACKTimeout = 50;
+            server.getRemoteService("testAckUnordered").register(Service.class, new ServiceImpl());
+            RRemoteService clientRemote = client.getRemoteService("testAckUnordered");
+            ExecutorService ee = Executors.newFixedThreadPool(50);
+
+            AtomicReference<Exception> unknownException = new AtomicReference<>(null);
+
+            for (int i = 0; i < 2000; i++) {
+                ee.submit(() -> {
+                    if (unknownException.get() != null) return;
+                    try {
+                        RemoteInvocationOptions opts = RemoteInvocationOptions.defaults()
+                                .expectAckWithin(lowACKTimeout, TimeUnit.MILLISECONDS)
+                                .expectResultWithin(5000, TimeUnit.MILLISECONDS);
+                        Service service = clientRemote.get(Service.class, opts);
+
+                        boolean r = service.process();
+                        assertThat(r).isEqualTo(true);
+                    } catch (RemoteServiceAckTimeoutException | RemoteServiceTimeoutException e) {
+                        // skip, those are expected errors in this test
+                    } catch (Exception e) {
+                        unknownException.set(e);
+                    }
+                });
+            }
+
+            ee.shutdown();
+            ee.awaitTermination(100, TimeUnit.SECONDS);
+
+            assertThat(unknownException.get()).isNull();
+        } finally {
+            client.shutdown();
+            server.shutdown();
+        }
+    }
+
+//    @Test
+    public void testPerformance() {
+        // For details: See #7055
+        testInCluster(redisClient -> {
+            Config config = redissonCluster.getConfig();
+            RedissonClient server = Redisson.create(config);
+            RedissonClient client = Redisson.create(config);
+
+            server.getRemoteService("TestPerformance").register(RemoteInterface.class, new RemoteImpl());
+
+            RemoteInterface serviceRemoteInterface = client.getRemoteService("TestPerformance").get(RemoteInterface.class);
+            ExecutorService executorService = Executors.newFixedThreadPool(64);
+
+            final int TOTAL = 50_000;
+            AtomicLong totalTime = new AtomicLong();
+            AtomicInteger successCount = new AtomicInteger();
+            final long start = System.currentTimeMillis();
+            for (int i = 0; i < TOTAL; i++) {
+                final long value = i;
+                executorService.submit(() -> {
+                    serviceRemoteInterface.resultMethod(value);
+                    totalTime.addAndGet(System.currentTimeMillis() - start);
+                    int finished = successCount.incrementAndGet();
+                    if (finished == TOTAL) {
+                        totalTime.set(System.currentTimeMillis() - start);
+                    }
+                });
+            }
+            executorService.shutdown();
+            try {
+                assertThat(executorService.awaitTermination(100, TimeUnit.SECONDS)).isTrue();
+                assertThat(successCount.get()).isEqualTo(TOTAL);
+                log.info("TestPerformance Result, duration={}, rps={}", totalTime, 1.0 * TOTAL / totalTime.get() * 1000);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    @Test
+    public void testRemoteServiceInCluster() {
+        LogCaptor logCaptor = LogCaptor.forClass(CommandDecoder.class);
+        logCaptor.setLogLevelToTrace();
+
+        testInCluster(redisson -> {
+            RRemoteService serverService = redisson.getRemoteService("test-cluster");
+            serverService.register(RemoteInterface.class, new RemoteImpl(), 5);
+
+            RRemoteService clientService = redisson.getRemoteService("test-cluster");
+            RemoteInterface service = clientService.get(RemoteInterface.class);
+
+            Long result = service.resultMethod(21L);
+            assertThat(result).isEqualTo(42L);
+
+            service.voidMethod("cluster-test", 100L);
+
+            RemoteInterface serviceWithAck = clientService.get(RemoteInterface.class,
+                    RemoteInvocationOptions.defaults().expectAckWithin(5, TimeUnit.SECONDS));
+            assertThat(serviceWithAck.resultMethod(50L)).isEqualTo(100L);
+
+            serverService.deregister(RemoteInterface.class);
+        });
+
+        assertThat(logCaptor.getTraceLogs().stream().noneMatch(n -> n.contains("reply: -MOVED"))).isTrue();
+        logCaptor.close();
+    }
+
+    @Test
+    public void testRemoteServiceAsyncInCluster() {
+        LogCaptor logCaptor = LogCaptor.forClass(CommandDecoder.class);
+        logCaptor.setLogLevelToTrace();
+
+        testInCluster(redisson -> {
+            RRemoteService serverService = redisson.getRemoteService("test-cluster-async-service");
+            serverService.register(RemoteInterface.class, new RemoteImpl(), 5);
+
+            RRemoteService clientService = redisson.getRemoteService("test-cluster-async-service");
+            RemoteInterfaceAsync asyncService = clientService.get(RemoteInterfaceAsync.class);
+
+            RFuture<Long> future = asyncService.resultMethod(25L);
+            Long result = future.toCompletableFuture().join();
+            assertThat(result).isEqualTo(50L);
+
+            serverService.deregister(RemoteInterface.class);
+        });
+
+        assertThat(logCaptor.getTraceLogs().stream().noneMatch(n -> n.contains("reply: -MOVED"))).isTrue();
+        logCaptor.close();
+    }
+
+    @Test
+    public void testRemoteServiceCancelInCluster() throws InterruptedException {
+        LogCaptor logCaptor = LogCaptor.forClass(CommandDecoder.class);
+        logCaptor.setLogLevelToTrace();
+
+        testInCluster(redisson -> {
+            AtomicInteger iterations = new AtomicInteger();
+            redisson.getRemoteService("test-cluster-cancel-service")
+                    .register(RemoteInterface.class, new RemoteImpl(iterations), 1);
+
+            RFuture<Void> future = redisson.getRemoteService("test-cluster-cancel-service")
+                    .get(RemoteInterfaceAsync.class)
+                    .cancelMethod();
+
+            try {
+                Thread.sleep(1500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+
+            assertThat(future.cancel(true)).isTrue();
+        });
+
+        assertThat(logCaptor.getTraceLogs().stream().noneMatch(n -> n.contains("reply: -MOVED"))).isTrue();
+        logCaptor.close();
+    }
+
+    @Test
+    public void testRemoteServiceTimeoutInCluster() {
+        LogCaptor logCaptor = LogCaptor.forClass(CommandDecoder.class);
+        logCaptor.setLogLevelToTrace();
+
+        testInCluster(redisson -> {
+            RRemoteService serverService = redisson.getRemoteService("test-cluster-timeout-service");
+            serverService.register(RemoteInterface.class, new RemoteImpl(), 1);
+
+            RRemoteService clientService = redisson.getRemoteService("test-cluster-timeout-service");
+            RemoteInterface service = clientService.get(RemoteInterface.class, 1, TimeUnit.SECONDS);
+
+            Assertions.assertThrows(RemoteServiceTimeoutException.class, () -> {
+                service.timeoutMethod();
+            });
+
+            serverService.deregister(RemoteInterface.class);
+        });
+
+        assertThat(logCaptor.getTraceLogs().stream().noneMatch(n -> n.contains("reply: -MOVED"))).isTrue();
+        logCaptor.close();
     }
 }

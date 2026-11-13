@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,8 +15,14 @@
  */
 package org.redisson;
 
+import org.redisson.api.bitset.BitFieldArgs;
+import org.redisson.api.bitset.BitFieldOverflow;
+import org.redisson.api.bitset.BitFieldParams;
+import org.redisson.api.bitset.BitRangeArgs;
+import org.redisson.api.bitset.BitRangeParams;
 import org.redisson.api.RBitSet;
 import org.redisson.api.RFuture;
+import org.redisson.api.bitset.BitOffset;
 import org.redisson.client.codec.ByteArrayCodec;
 import org.redisson.client.codec.LongCodec;
 import org.redisson.client.codec.StringCodec;
@@ -25,6 +31,7 @@ import org.redisson.command.CommandAsyncExecutor;
 import org.redisson.command.CommandBatchService;
 
 import java.util.*;
+import org.redisson.config.ReadMode;
 
 /**
  * 
@@ -65,6 +72,11 @@ public class RedissonBitSet extends RedissonExpirable implements RBitSet {
     @Override
     public long incrementAndGetUnsigned(int size, long offset, long increment) {
         return get(incrementAndGetUnsignedAsync(size, offset, increment));
+    }
+
+    @Override
+    public List<Long> bitField(BitFieldArgs args) {
+        return get(bitFieldAsync(args));
     }
 
     @Override
@@ -119,6 +131,110 @@ public class RedissonBitSet extends RedissonExpirable implements RBitSet {
         }
         return commandExecutor.writeAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.BITFIELD_LONG,
                                             getRawName(), "INCRBY", "u" + size, offset, increment);
+    }
+
+    @Override
+    public RFuture<List<Long>> bitFieldAsync(BitFieldArgs args) {
+        if (args == null) {
+            throw new IllegalArgumentException("Args can't be null");
+        }
+
+        if (!(args instanceof BitFieldParams)) {
+            throw new IllegalArgumentException("Unsupported BitFieldArgs implementation");
+        }
+
+        BitFieldParams params = (BitFieldParams) args;
+        if (params.getOperations().isEmpty()) {
+            throw new IllegalArgumentException("No bitfield operations defined");
+        }
+
+        List<Object> commandArgs = new ArrayList<>();
+        commandArgs.add(getRawName());
+
+        boolean isReadOnly = true;
+        for (BitFieldParams.Operation operation : params.getOperations()) {
+            switch (operation.getType()) {
+                case OVERFLOW:
+                    BitFieldOverflow overflow = operation.getOverflow();
+                    if (overflow == null) {
+                        throw new IllegalArgumentException("Overflow can't be null");
+                    }
+                    commandArgs.add("OVERFLOW");
+                    commandArgs.add(overflow.name());
+                    break;
+                case GET:
+                    validateEncoding(operation.getEncoding());
+                    validateOffset(operation.getOffset());
+                    commandArgs.add("GET");
+                    commandArgs.add(operation.getEncoding());
+                    commandArgs.add(operation.getOffset().getValue());
+                    break;
+                case SET:
+                    validateEncoding(operation.getEncoding());
+                    validateOffset(operation.getOffset());
+                    if (operation.getValue() == null) {
+                        throw new IllegalArgumentException("Value can't be null");
+                    }
+                    commandArgs.add("SET");
+                    commandArgs.add(operation.getEncoding());
+                    commandArgs.add(operation.getOffset().getValue());
+                    commandArgs.add(operation.getValue());
+                    isReadOnly = false;
+                    break;
+                case INCRBY:
+                    validateEncoding(operation.getEncoding());
+                    validateOffset(operation.getOffset());
+                    if (operation.getValue() == null) {
+                        throw new IllegalArgumentException("Increment can't be null");
+                    }
+                    commandArgs.add("INCRBY");
+                    commandArgs.add(operation.getEncoding());
+                    commandArgs.add(operation.getOffset().getValue());
+                    commandArgs.add(operation.getValue());
+                    isReadOnly = false;
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unknown bitfield operation");
+            }
+        }
+
+        ReadMode effectiveReadMode = commandExecutor.getReadMode();
+        if (effectiveReadMode == null) {
+            effectiveReadMode = commandExecutor.getServiceManager().getConfig().getReadMode();
+        }
+        if (isReadOnly && effectiveReadMode != ReadMode.MASTER) {
+            return commandExecutor.readAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.BITFIELD_RO_LONG_LIST,
+                    commandArgs.toArray());
+        }
+
+        return commandExecutor.writeAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.BITFIELD_LONG_LIST,
+                commandArgs.toArray());
+    }
+
+    private void validateEncoding(String encoding) {
+        if (encoding == null || encoding.length() < 2) {
+            throw new IllegalArgumentException("Invalid encoding");
+        }
+        char type = encoding.charAt(0);
+        if (type != 'u' && type != 'i') {
+            throw new IllegalArgumentException("Invalid encoding");
+        }
+        int size = Integer.parseInt(encoding.substring(1));
+        if (type == 'u') {
+            if (size > 63) {
+                throw new IllegalArgumentException("Size can't be greater than 63 bits");
+            }
+        } else {
+            if (size > 64) {
+                throw new IllegalArgumentException("Size can't be greater than 64 bits");
+            }
+        }
+    }
+
+    private void validateOffset(BitOffset offset) {
+        if (offset == null) {
+            throw new IllegalArgumentException("Offset can't be null");
+        }
     }
 
     @Override
@@ -264,6 +380,11 @@ public class RedissonBitSet extends RedissonExpirable implements RBitSet {
     }
 
     @Override
+    public void set(long[] indexArray, boolean value) {
+        get(setAsync(indexArray, value));
+    }
+
+    @Override
     public boolean get(long bitIndex) {
         return get(getAsync(bitIndex));
     }
@@ -271,6 +392,24 @@ public class RedissonBitSet extends RedissonExpirable implements RBitSet {
     @Override
     public RFuture<Boolean> getAsync(long bitIndex) {
         return commandExecutor.readAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.GETBIT, getRawName(), bitIndex);
+    }
+
+    @Override
+    public boolean[] get(long... bitIndexes) {
+        return get(getAsync(bitIndexes));
+    }
+
+    @Override
+    public RFuture<boolean[]> getAsync(long... bitIndexes) {
+        Object[] indexes = new Object[bitIndexes.length * 3 + 1];
+        int j = 0;
+        indexes[j++] = getRawName();
+        for (long l : bitIndexes) {
+            indexes[j++] = "get";
+            indexes[j++] = "u1";
+            indexes[j++] = l;
+        }
+        return commandExecutor.readAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.BITFIELD_BOOLEANS, indexes);
     }
 
     @Override
@@ -300,11 +439,22 @@ public class RedissonBitSet extends RedissonExpirable implements RBitSet {
     }
 
     protected int toInt(boolean value) {
-        int val = 0;
-        if (value) {
-            val = 1;
+        return Boolean.compare(value, false);
+    }
+
+    @Override
+    public RFuture<Void> setAsync(long[] indexArray, boolean value) {
+        int val = toInt(value);
+        Object[] paramArray = new Object[indexArray.length * 4 + 1];
+        int j = 0;
+        paramArray[j++] = getRawName();
+        for (long l : indexArray) {
+            paramArray[j++] = "set";
+            paramArray[j++] = "u1";
+            paramArray[j++] = l;
+            paramArray[j++] = val;
         }
-        return val;
+        return commandExecutor.writeAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.BITFIELD_VOID, paramArray);
     }
 
     @Override
@@ -320,6 +470,35 @@ public class RedissonBitSet extends RedissonExpirable implements RBitSet {
     @Override
     public long cardinality() {
         return get(cardinalityAsync());
+    }
+
+    @Override
+    public long[] getIndexes(BitRangeArgs args) {
+        return get(getIndexesAsync(args));
+    }
+
+    @Override
+    public RFuture<long[]> getIndexesAsync(BitRangeArgs args) {
+        BitRangeParams params = (BitRangeParams) args;
+        List<Object> commandArgs = new ArrayList<>(7);
+        commandArgs.add(getRawName());
+        commandArgs.add(params.getStart());
+        commandArgs.add(params.getEnd());
+
+        if (params.isBitUnit()) {
+            commandArgs.add("BIT");
+        } else {
+            commandArgs.add("BYTE");
+        }
+        if (params.getLimit() != null) {
+            commandArgs.add("LIMIT");
+            commandArgs.add(params.getLimit());
+        }
+        if (params.isZeros()) {
+            commandArgs.add("ZEROS");
+        }
+        return commandExecutor.readAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.BITRANGEINTARRAY,
+                                            commandArgs.toArray());
     }
 
     @Override
@@ -343,32 +522,32 @@ public class RedissonBitSet extends RedissonExpirable implements RBitSet {
     }
 
     @Override
-    public void or(String... bitSetNames) {
-        get(orAsync(bitSetNames));
+    public long or(String... bitSetNames) {
+        return get(orAsync(bitSetNames));
     }
 
     @Override
-    public void and(String... bitSetNames) {
-        get(andAsync(bitSetNames));
+    public long and(String... bitSetNames) {
+        return get(andAsync(bitSetNames));
     }
 
     @Override
-    public void xor(String... bitSetNames) {
-        get(xorAsync(bitSetNames));
+    public long xor(String... bitSetNames) {
+        return get(xorAsync(bitSetNames));
     }
 
     @Override
-    public void not() {
-        get(notAsync());
+    public long not() {
+        return get(notAsync());
     }
 
-    private RFuture<Void> opAsync(String op, String... bitSetNames) {
-        List<Object> params = new ArrayList<Object>(bitSetNames.length + 3);
+    private RFuture<Long> opAsync(String op, String... bitSetNames) {
+        List<Object> params = new ArrayList<>(bitSetNames.length + 3);
         params.add(op);
         params.add(getRawName());
         params.add(getRawName());
         params.addAll(Arrays.asList(bitSetNames));
-        return commandExecutor.writeAsync(getRawName(), StringCodec.INSTANCE, RedisCommands.BITOP, params.toArray());
+        return commandExecutor.writeAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.BITOP, params.toArray());
     }
 
     @Override
@@ -411,14 +590,22 @@ public class RedissonBitSet extends RedissonExpirable implements RBitSet {
     @Override
     public RFuture<Long> lengthAsync() {
         return commandExecutor.evalReadAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_LONG,
-                "local fromBit = redis.call('bitpos', KEYS[1], 1, -1);"
-                + "local toBit = 8*(fromBit/8 + 1) - fromBit % 8;"
-                        + "for i = toBit, fromBit, -1 do "
-                            + "if redis.call('getbit', KEYS[1], i) == 1 then "
-                                + "return i+1;"
-                            + "end;"
-                       + "end;" +
-                     "return fromBit+1",
+                "local i = redis.call('bitpos', KEYS[1], 1, -1); "
+                        + "local pos = i < 0 and redis.call('bitpos', KEYS[1], 0, -1) or math.floor(i / 8) * 8; "
+                        + "while  (pos >= 0) "
+                        + "do "
+                            + "i = redis.call('bitpos', KEYS[1], 1, math.floor(pos / 8), math.floor(pos / 8)); "
+                            + "if i < 0 then "
+                                + "pos = pos - 8; "
+                            + "else "
+                                + "for j = pos + 7, pos, -1 do "
+                                    + "if redis.call('getbit', KEYS[1], j) == 1 then "
+                                        + "return j + 1; "
+                                    + "end; "
+                                + "end; "
+                            + "end; "
+                        + "end; "
+                        + "return 0; ",
                 Collections.<Object>singletonList(getRawName()));
     }
 
@@ -443,7 +630,7 @@ public class RedissonBitSet extends RedissonExpirable implements RBitSet {
     }
 
     @Override
-    public RFuture<Void> notAsync() {
+    public RFuture<Long> notAsync() {
         return opAsync("NOT");
     }
 
@@ -478,18 +665,57 @@ public class RedissonBitSet extends RedissonExpirable implements RBitSet {
     }
 
     @Override
-    public RFuture<Void> orAsync(String... bitSetNames) {
+    public RFuture<Long> orAsync(String... bitSetNames) {
         return opAsync("OR", bitSetNames);
     }
 
     @Override
-    public RFuture<Void> andAsync(String... bitSetNames) {
+    public RFuture<Long> andAsync(String... bitSetNames) {
         return opAsync("AND", bitSetNames);
     }
 
     @Override
-    public RFuture<Void> xorAsync(String... bitSetNames) {
+    public RFuture<Long> xorAsync(String... bitSetNames) {
         return opAsync("XOR", bitSetNames);
     }
 
+    @Override
+    public long diff(String... bitSetNames) {
+        return get(diffAsync(bitSetNames));
+    }
+
+    @Override
+    public long diffInverse(String... bitSetNames) {
+        return get(diffInverseAsync(bitSetNames));
+    }
+
+    @Override
+    public long andOr(String... bitSetNames) {
+        return get(andOrAsync(bitSetNames));
+    }
+
+    @Override
+    public long setExclusive(String... bitSetNames) {
+        return get(setExclusiveAsync(bitSetNames));
+    }
+
+    @Override
+    public RFuture<Long> diffAsync(String... bitSetNames) {
+        return opAsync("DIFF", bitSetNames);
+    }
+
+    @Override
+    public RFuture<Long> diffInverseAsync(String... bitSetNames) {
+        return opAsync("DIFF1", bitSetNames);
+    }
+
+    @Override
+    public RFuture<Long> andOrAsync(String... bitSetNames) {
+        return opAsync("ANDOR", bitSetNames);
+    }
+
+    @Override
+    public RFuture<Long> setExclusiveAsync(String... bitSetNames) {
+        return opAsync("ONE", bitSetNames);
+    }
 }

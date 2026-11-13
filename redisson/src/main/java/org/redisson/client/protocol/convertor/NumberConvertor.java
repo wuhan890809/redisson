@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,6 +34,12 @@ public class NumberConvertor implements Convertor<Object> {
     @Override
     public Object convert(Object result) {
         String res = (String) result;
+        // decimal result can't be represented by an integer type
+        if ((resultClass.isAssignableFrom(Long.class) || resultClass.isAssignableFrom(Integer.class))
+                && (res.indexOf('.') >= 0 || res.indexOf('E') >= 0 || res.indexOf('e') >= 0)) {
+            Object obj = Double.parseDouble(res);
+            return obj;
+        }
         if (resultClass.isAssignableFrom(Long.class)) {
             Object obj = Long.parseLong(res);
             return obj;

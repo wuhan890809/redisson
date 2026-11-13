@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,16 @@ public class HashValue {
 
     private final AtomicInteger counter = new AtomicInteger();
     private final List<byte[]> keyIds = new ArrayList<byte[]>();
-    
+    private boolean allKeys;
+
+    public boolean isAllKeys() {
+        return allKeys;
+    }
+
+    public void setAllKeys(boolean allKeys) {
+        this.allKeys = allKeys;
+    }
+
     public HashValue() {
     }
     

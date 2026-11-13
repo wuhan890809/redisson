@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -78,5 +78,48 @@ public interface RSetMultimap<K, V> extends RMultimap<K, V> {
      */
     @Override
     Set<Map.Entry<K, V>> entries();
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Because a {@code RSetMultiMap} has unique values for a given key, this
+     * method returns a {@link Set}, instead of the {@link java.util.Collection}
+     * specified in the {@link RMultimap} interface.
+     */
+    @Override
+    default Set<Map.Entry<K, V>> entries(int count) {
+        return entries();
+    }
+
+    /**
+     * Adds object event listener
+     *
+     * @see org.redisson.api.listener.MapPutListener
+     * @see org.redisson.api.listener.MapRemoveListener
+     * @see org.redisson.api.listener.SetAddListener
+     * @see org.redisson.api.listener.SetRemoveListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
+     *
+     * @param listener object event listener
+     * @return listener id
+     */
+    int addListener(ObjectListener listener);
+
+
+    /**
+     * Adds object event listener
+     *
+     * @see org.redisson.api.listener.MapPutListener
+     * @see org.redisson.api.listener.MapRemoveListener
+     * @see org.redisson.api.listener.SetAddListener
+     * @see org.redisson.api.listener.SetRemoveListener
+     * @see org.redisson.api.ExpiredObjectListener
+     * @see org.redisson.api.DeletedObjectListener
+     *
+     * @param listener object event listener
+     * @return listener id
+     */
+    RFuture<Integer> addListenerAsync(ObjectListener listener);
 
 }

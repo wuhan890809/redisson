@@ -1,17 +1,25 @@
 package org.redisson;
 
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RDeque;
+import org.redisson.api.listener.DequeAddFirstListener;
+import org.redisson.api.listener.DequeAddLastListener;
+import org.redisson.api.listener.ListAddListener;
 import org.redisson.api.queue.DequeMoveArgs;
 
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
+import java.time.Duration;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class RedissonDequeTest extends BaseTest {
+public class RedissonDequeTest extends RedisDockerTest {
 
     @Test
     public void testAddIfExists() {
@@ -23,6 +31,82 @@ public class RedissonDequeTest extends BaseTest {
         deque1.addFirstIfExists(4, 5);
 
         assertThat(deque1).containsExactly(5, 4, 1, 2, 3);
+    }
+
+
+    @Test
+    public void testAddListCompatibleListener() {
+        testWithParams(redisson -> {
+            Queue<Integer> nfs = new ConcurrentLinkedQueue<>();
+            RDeque<Integer> deque = redisson.getDeque("testAddListCompatibleListener");
+            deque.add(1);
+
+            int id = deque.addListener((ListAddListener) name -> nfs.add(1));
+
+            deque.addLast(2);
+
+            Awaitility.waitAtMost(Duration.ofSeconds(1))
+                    .untilAsserted(() -> assertThat(nfs).contains(1));
+
+            nfs.clear();
+            deque.removeListener(id);
+            deque.addLast(3);
+
+            Awaitility.await()
+                    .during(Duration.ofMillis(500))
+                    .atMost(Duration.ofSeconds(1))
+                    .until(nfs::isEmpty);
+        }, NOTIFY_KEYSPACE_EVENTS, "El");
+    }
+
+    @Test
+    public void testAddFirstListener() {
+        testWithParams(redisson -> {
+            Queue<Integer> nfs = new ConcurrentLinkedQueue<>();
+            RDeque<Integer> deque = redisson.getDeque("testAddFirstListener");
+            deque.add(1);
+
+            int id = deque.addListener((DequeAddFirstListener) name -> nfs.add(1));
+
+            deque.addFirst(2);
+
+            Awaitility.waitAtMost(Duration.ofSeconds(1))
+                    .untilAsserted(() -> assertThat(nfs).contains(1));
+
+            nfs.clear();
+            deque.removeListener(id);
+            deque.addFirst(3);
+
+            Awaitility.await()
+                    .during(Duration.ofMillis(500))
+                    .atMost(Duration.ofSeconds(1))
+                    .until(nfs::isEmpty);
+        }, NOTIFY_KEYSPACE_EVENTS, "El");
+    }
+
+    @Test
+    public void testAddLastListener() {
+        testWithParams(redisson -> {
+            Queue<Integer> nfs = new ConcurrentLinkedQueue<>();
+            RDeque<Integer> deque = redisson.getDeque("testAddLastListener");
+            deque.add(1);
+
+            int id = deque.addListener((DequeAddLastListener) name -> nfs.add(1));
+
+            deque.addLast(2);
+
+            Awaitility.waitAtMost(Duration.ofSeconds(1))
+                    .untilAsserted(() -> assertThat(nfs).contains(1));
+
+            nfs.clear();
+            deque.removeListener(id);
+            deque.addLast(3);
+
+            Awaitility.await()
+                    .during(Duration.ofMillis(500))
+                    .atMost(Duration.ofSeconds(1))
+                    .until(nfs::isEmpty);
+        }, NOTIFY_KEYSPACE_EVENTS, "El");
     }
 
     @Test
@@ -136,6 +220,16 @@ public class RedissonDequeTest extends BaseTest {
 
         assertThat(queue).containsExactly(3, 2, 1);
    }
+
+    @Test
+    public void testAddFirstLastMulti() {
+        RDeque<Integer> queue = redisson.getDeque("deque");
+        queue.addAll(Arrays.asList(1, 2, 3, 4));
+        queue.addFirst(0, 1, 0);
+        queue.addLast(10, 20, 10);
+
+        assertThat(queue).containsExactly(0, 1, 0, 1, 2, 3, 4, 10, 20, 10);
+    }
 
     @Test
     public void testAddFirst() {

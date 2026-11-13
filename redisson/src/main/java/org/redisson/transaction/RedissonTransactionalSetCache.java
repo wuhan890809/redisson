@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,22 +15,20 @@
  */
 package org.redisson.transaction;
 
-import java.time.Instant;
-import java.util.Collection;
-import java.util.Date;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-
 import org.redisson.RedissonSetCache;
+import org.redisson.ScanResult;
 import org.redisson.api.RFuture;
 import org.redisson.api.mapreduce.RCollectionMapReduce;
 import org.redisson.client.RedisClient;
 import org.redisson.client.codec.Codec;
-import org.redisson.client.protocol.decoder.ListScanResult;
 import org.redisson.command.CommandAsyncExecutor;
 import org.redisson.transaction.operation.TransactionalOperation;
+
+import java.util.Collection;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 
@@ -59,35 +57,34 @@ public class RedissonTransactionalSetCache<V> extends RedissonSetCache<V> {
         this.transactionalSet = new TransactionalSetCache<V>(commandExecutor, timeout, operations, innerSet, transactionId);
     }
 
-
     @Override
-    public RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit) {
-        throw new UnsupportedOperationException("expire method is not supported in transaction");
-    }
-    
-    @Override
-    public RFuture<Boolean> expireAtAsync(Date timestamp) {
-        throw new UnsupportedOperationException("expire method is not supported in transaction");
+    public RFuture<Boolean> expireAsync(long timeToLive, TimeUnit timeUnit, String param, String... keys) {
+        return transactionalSet.expireAsync(timeToLive, timeUnit, param, keys);
     }
 
     @Override
-    public RFuture<Boolean> expireAsync(Instant timestamp) {
-        throw new UnsupportedOperationException("expire method is not supported in transaction");
-    }
-
-    @Override
-    public RFuture<Boolean> expireAtAsync(long timestamp) {
-        throw new UnsupportedOperationException("expire method is not supported in transaction");
+    protected RFuture<Boolean> expireAtAsync(long timestamp, String param, String... keys) {
+        return transactionalSet.expireAtAsync(timestamp, param, keys);
     }
     
     @Override
     public RFuture<Boolean> clearExpireAsync() {
-        throw new UnsupportedOperationException("clearExpire method is not supported in transaction");
+        return transactionalSet.clearExpireAsync();
     }
     
     @Override
     public RFuture<Boolean> moveAsync(int database) {
         throw new UnsupportedOperationException("move method is not supported in transaction");
+    }
+
+    @Override
+    public RFuture<Boolean> blessAsync() {
+        throw new UnsupportedOperationException("bless method is not supported in transaction");
+    }
+
+    @Override
+    public RFuture<Boolean> unblessAsync() {
+        throw new UnsupportedOperationException("unbless method is not supported in transaction");
     }
     
     @Override
@@ -101,7 +98,7 @@ public class RedissonTransactionalSetCache<V> extends RedissonSetCache<V> {
     }
 
     @Override
-    public ListScanResult<Object> scanIterator(String name, RedisClient client, long startPos, String pattern, int count) {
+    public ScanResult<Object> scanIterator(String name, RedisClient client, String startPos, String pattern, int count) {
         checkState();
         return transactionalSet.scanIterator(name, client, startPos, pattern, count);
     }
@@ -153,7 +150,25 @@ public class RedissonTransactionalSetCache<V> extends RedissonSetCache<V> {
         checkState();
         return transactionalSet.removeAllAsync(c);
     }
-    
+
+    @Override
+    public RFuture<Boolean> unlinkAsync() {
+        checkState();
+        return transactionalSet.unlinkAsync();
+    }
+
+    @Override
+    public RFuture<Boolean> touchAsync() {
+        checkState();
+        return transactionalSet.touchAsync();
+    }
+
+    @Override
+    public RFuture<Boolean> deleteAsync() {
+        checkState();
+        return transactionalSet.deleteAsync();
+    }
+
     protected void checkState() {
         if (executed.get()) {
             throw new IllegalStateException("Unable to execute operation. Transaction is in finished state!");

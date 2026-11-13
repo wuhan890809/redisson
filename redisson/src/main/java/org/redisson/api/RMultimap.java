@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -181,6 +181,19 @@ public interface RMultimap<K, V> extends RExpirable, RMultimapAsync<K, V> {
     Collection<V> replaceValues(K key, Iterable<? extends V> values);
 
     /**
+     * Stores a collection of values with the same key, replacing any existing
+     * values for that key. Is faster than {@link #replaceValues} by not returning
+     * the values.
+     *
+     * <p>If {@code values} is empty, this is equivalent to
+     * {@link #removeAll(Object) removeAll(key)}.
+     *
+     * @param key - map key
+     * @param values - map values
+     */
+    void fastReplaceValues(K key, Iterable<? extends V> values);
+
+    /**
      * Removes all values associated with the key {@code key}.
      *
      * <p>Once this method returns, {@code key} will not be mapped to any values
@@ -232,7 +245,22 @@ public interface RMultimap<K, V> extends RExpirable, RMultimapAsync<K, V> {
      * @return set of keys
      */
     Set<K> keySet();
-    
+
+    /**
+     * Returns a view collection of all distinct keys contained in this multimap.
+     * Keys are loaded in batches; batch size is defined by the <code>count</code> parameter.
+     * Larger values reduce the number of HSCAN round-trips when iterating large multimaps.
+     *
+     * <p>Changes to the returned set will update the underlying multimap, and
+     * vice versa. However, <i>adding</i> to the returned set is not possible.
+     *
+     * @param count - size of the keys batch
+     * @return set of keys
+     */
+    default Set<K> keySet(int count) {
+        return keySet();
+    }
+
     /**
      *  Returns the count of distinct keys in this multimap.
      *  
@@ -254,6 +282,21 @@ public interface RMultimap<K, V> extends RExpirable, RMultimapAsync<K, V> {
     Collection<V> values();
 
     /**
+     * Returns a view collection containing the <i>value</i> from each key-value
+     * pair contained in this multimap, without collapsing duplicates.
+     * Values are loaded in batches; batch size is defined by the <code>count</code> parameter.
+     * Larger values reduce the number of HSCAN round-trips on the key dimension when
+     * iterating large multimaps, and (for {@code RSetMultimap}) the number of SSCAN
+     * round-trips on the value dimension as well.
+     *
+     * @param count size of the iteration batch
+     * @return collection of values
+     */
+    default Collection<V> values(int count) {
+        return values();
+    }
+
+    /**
      * Returns a view collection of all key-value pairs contained in this
      * multimap, as {@link Map.Entry} instances.
      *
@@ -266,6 +309,21 @@ public interface RMultimap<K, V> extends RExpirable, RMultimapAsync<K, V> {
     Collection<Map.Entry<K, V>> entries();
 
     /**
+     * Returns a view collection of all key-value pairs contained in this multimap,
+     * as {@link Map.Entry} instances.
+     * Entries are loaded in batches; batch size is defined by the <code>count</code> parameter.
+     * Larger values reduce the number of HSCAN round-trips on the key dimension when
+     * iterating large multimaps, and (for {@code RSetMultimap}) the number of SSCAN
+     * round-trips on the value dimension as well.
+     *
+     * @param count size of the iteration batch
+     * @return collection of entries
+     */
+    default Collection<Map.Entry<K, V>> entries(int count) {
+        return entries();
+    }
+
+    /**
      * Removes <code>keys</code> from map by one operation
      *
      * Works faster than <code>RMultimap.remove</code> but not returning
@@ -275,6 +333,14 @@ public interface RMultimap<K, V> extends RExpirable, RMultimapAsync<K, V> {
      * @return the number of keys that were removed from the hash, not including specified but non existing keys
      */
     long fastRemove(K... keys);
+
+    /**
+     * Removes <code>values</code> from map by one operation
+     *
+     * @param values map values
+     * @return the number of values that were removed from the map
+     */
+    long fastRemoveValue(V... values);
 
     /**
      * Read all keys at once

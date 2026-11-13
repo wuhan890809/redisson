@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,9 +19,9 @@ import io.reactivex.rxjava3.core.Single;
 import org.reactivestreams.Publisher;
 import org.redisson.RedissonObject;
 import org.redisson.ScanIterator;
+import org.redisson.ScanResult;
 import org.redisson.api.*;
 import org.redisson.client.RedisClient;
-import org.redisson.client.protocol.decoder.ListScanResult;
 
 /**
  *
@@ -42,7 +42,7 @@ public class RedissonSetCacheRx<V> {
     public Publisher<V> iterator() {
         return new SetRxIterator<V>() {
             @Override
-            protected RFuture<ListScanResult<Object>> scanIterator(RedisClient client, long nextIterPos) {
+            protected RFuture<ScanResult<Object>> scanIterator(RedisClient client, String nextIterPos) {
                 return ((ScanIterator) instance).scanIteratorAsync(((RedissonObject) instance).getRawName(), client, nextIterPos, null, 10);
             }
         }.create();

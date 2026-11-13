@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013-2021 Nikita Koksharov
+ * Copyright (c) 2013-2026 Nikita Koksharov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,16 @@
  */
 package org.redisson.api;
 
+import org.redisson.api.queue.QueueMoveElementsArgs;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * Distributed implementation of {@link BlockingQueue}
@@ -42,6 +49,64 @@ public interface RBlockingQueue<V> extends BlockingQueue<V>, RQueue<V>, RBlockin
      * @throws InterruptedException if interrupted while waiting
      */
     V pollFromAny(long timeout, TimeUnit unit, String... queueNames) throws InterruptedException;
+
+    /**
+     * Retrieves and removes first available head element of <b>any</b> queue,
+     * waiting up to the specified wait time if necessary for an element to become available
+     * in any of defined queues <b>including</b> queue itself.
+     *
+     * @param queueNames queue names. Queue name itself is always included
+     * @param timeout how long to wait before giving up, in units of
+     *        {@code unit}
+     * @return the head of this queue, or {@code null} if the
+     *         specified waiting time elapses before an element is available
+     * @throws InterruptedException if interrupted while waiting
+     */
+    Entry<String, V> pollFromAnyWithName(Duration timeout, String... queueNames) throws InterruptedException;
+
+    /**
+     * Retrieves and removes first available head elements of <b>any</b> queue,
+     * waiting up to the specified wait time if necessary for an element to become available
+     * in any of defined queues <b>including</b> queue itself.
+     *
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the head elements
+     */
+    Map<String, List<V>> pollFirstFromAny(Duration duration, int count, String... queueNames) throws InterruptedException;
+
+    /**
+     * Retrieves and removes first available tail elements of <b>any</b> queue,
+     * waiting up to the specified wait time if necessary for an element to become available
+     * in any of defined queues <b>including</b> queue itself.
+     *
+     * <p>
+     * Requires <b>Redis 7.0.0 and higher.</b>
+     *
+     * @param duration how long to wait before giving up
+     * @param count elements amount
+     * @param queueNames name of queues
+     * @return the tail elements
+     */
+    Map<String, List<V>> pollLastFromAny(Duration duration, int count, String... queueNames) throws InterruptedException;
+
+    /**
+     * Retrieves and removes first available tail element of <b>any</b> queue,
+     * waiting up to the specified wait time if necessary for an element to become available
+     * in any of defined queues <b>including</b> queue itself.
+     *
+     * @param queueNames queue names. Queue name itself is always included
+     * @param timeout how long to wait before giving up, in units of
+     *        {@code unit}
+     * @return the tail of this queue, or {@code null} if the
+     *         specified waiting time elapses before an element is available
+     * @throws InterruptedException if interrupted while waiting
+     */
+    Entry<String, V> pollLastFromAnyWithName(Duration timeout, String... queueNames) throws InterruptedException;
 
     /**
      * Retrieves and removes last available tail element of this queue and adds it at the head of <code>queueName</code>,
@@ -71,13 +136,47 @@ public interface RBlockingQueue<V> extends BlockingQueue<V>, RQueue<V>, RBlockin
     V takeLastAndOfferFirstTo(String queueName) throws InterruptedException;
 
     /**
-     * Subscribes on elements appeared in this queue.
-     * Continuously invokes {@link #takeAsync()} method to get a new element.
+     * Retrieves and removes the head elements of this queue
+     * and adds them at the tail of <code>queueName</code>.
+     * If necessary waits up to defined <code>timeout</code>
+     * for elements to become available.
+     * Returns moved elements.
+     * <p>
+     * Code example:
+     * <pre>
+     * List&lt;V&gt; elements = queue.move(Duration.ofSeconds(10),
+     *                                QueueMoveElementsArgs.to("myQueue")
+     *                                                     .count(10));
+     * </pre>
+     * <p>
+     * Requires <b>Redis 8.10.0 and higher.</b>
+     *
+     * @param timeout how long to wait before giving up
+     * @param args - arguments object
+     * @return moved elements or empty list if the
+     *         specified waiting time elapses before elements are available
+     */
+    List<V> move(Duration timeout, QueueMoveElementsArgs args);
+
+    /**
+     * Use {@link #subscribeOnElements(Function)} instead.
      *
      * @param consumer - queue elements listener
      * @return listenerId - id of listener
      */
+    @Deprecated
     int subscribeOnElements(Consumer<V> consumer);
+
+    /**
+     * Subscribes on elements appeared in this queue.
+     * Continuously invokes {@link #takeAsync()} method to get a new element.
+     * <p>
+     * NOTE: don't call blocking methods in the elements listener
+     *
+     * @param consumer - queue elements listener
+     * @return listenerId - id of listener
+     */
+    int subscribeOnElements(Function<V, CompletionStage<Void>> consumer);
 
     /**
      * Un-subscribes defined listener.
